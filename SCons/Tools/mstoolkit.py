@@ -332,12 +332,20 @@ def generate(env):
 	env['PCHCOM'] = '$CXX $CXXFLAGS $CPPFLAGS $_CPPDEFFLAGS $_CPPINCFLAGS /c $SOURCES /Fo${TARGETS[1]} /Yc$PCHSTOP /Fp${TARGETS[0]} $CCPDBFLAGS'
 	env['BUILDERS']['PCH'] = pch_builder
 
-	# VC 2003 Toolkit does not have lib.exe but we can use link.exe
+	# VC 2003 Toolkit does not have lib.exe but we can use link.exe.
+	# AR/LINK are kept as bare tool names, resolved through env['ENV']['PATH']
+	# which generate() fills from the toolset's bin directory. An absolute
+	# path does not survive $TEMPFILE: its env.subst_list() splits
+	# C:\Program Files\...\link.EXE into two argv entries whether or not the
+	# value is wrapped in quotes, so a long link line ran as
+	# `"C:\Program @file.lnk` and died with "The filename, directory name, or
+	# volume label syntax is incorrect". SCons' own mslink tool keeps
+	# env['LINK'] = 'link' for the same reason.
 	if not sdk_path_AR or not env.File(sdk_path_AR).exists():
-		env['AR']          = '"' + sdk_path_LINK + '"'
+		env['AR']          = 'link'
 		env['ARFLAGS'] = '/LIB ' + env['ARFLAGS']
 	else:
-		env['AR']          = '"' + sdk_path_AR + '"'
+		env['AR']          = 'lib'
 		env['ARFLAGS']     = SCons.Util.CLVar('/nologo')
 	env['ARCOM']       = "${TEMPFILE('$AR $ARFLAGS /OUT:$TARGET $SOURCES')}"
 
@@ -352,7 +360,7 @@ def generate(env):
 	env['_SHLINK_SOURCES'] = win32ShlinkSources
 	env['SHLINKCOM']   =  compositeLinkAction
 	env['SHLIBEMITTER']= win32LibEmitter
-	env['LINK'] =  '"' + sdk_path_LINK + '"'
+	env['LINK'] = 'link'
 	env['LINKFLAGS']   = SCons.Util.CLVar('/nologo')
 	env['_PDB'] = pdbGenerator
 	env['LINKCOM'] = '${TEMPFILE("$LINK $LINKFLAGS /OUT:$TARGET $( $_LIBDIRFLAGS $) $_LIBFLAGS $_PDB $SOURCES")}'
