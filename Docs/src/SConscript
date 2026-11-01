@@ -109,6 +109,7 @@ DOCS_CONFIG = {
 
 import os
 import re
+import subprocess
 
 Import('halibut env build_doctype')
 
@@ -133,11 +134,16 @@ def docs_emitter(target, source, env):
 
 def docs_halibut_action(target, source, env):
 	buts = ' '.join(i.abspath for i in source if i.get_suffix() == '.but')
-	result = Execute(env.Action(
-		'${HALIBUT[0].abspath} ' + buts,
-		'', # empty display string
-		chdir = '$BUILDDIR',
-	))
+	# halibut writes its output into the current directory, but Action(chdir=)
+	# chdirs the whole scons process: while this action runs, every other job
+	# of a -j build loses the directory its relative targets and actions are
+	# resolved against ("No such file or directory"). Run halibut with its own
+	# working directory in a subprocess, which leaves scons' cwd alone.
+	result = subprocess.call(
+		env.subst('${HALIBUT[0].abspath} ' + buts),
+		shell = True,
+		cwd = env.subst('$BUILDDIR')
+	)
 	#raw_input('meh?')
 
 def docs_fixer(target, source, env):
