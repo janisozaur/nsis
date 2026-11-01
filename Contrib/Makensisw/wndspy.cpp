@@ -169,12 +169,22 @@ static HWND GetChildWindowFromPointHelper(POINT pt)
   return hWnd;
 }
 
+// The VC6-era Platform SDK declares IsHungAppWindow() without WINAPI in
+// WinUser.h, while its User32.Lib only carries the stdcall import
+// (__imp__IsHungAppWindow@4), so a direct call can never be resolved from
+// that header/library pair ("unresolved external symbol __imp__IsHungAppWindow").
+// Those toolsets look the function up dynamically instead, which is also what
+// the code below already does for old MinGW releases.
+#if defined(_MSC_VER) && _MSC_VER < 1300
+#  define NSIS_ISHUNG_DYNAMIC
+#endif
+
 #if defined(__MINGW32_MAJOR_VERSION) && !defined(__MINGW64_VERSION_MAJOR) && (!defined(_WIN32_WINNT) || (_WIN32_WINNT < 0x0500))
 WINUSERAPI BOOL WINAPI IsHungAppWindow(HWND); // MinGW is wrong, IsHungAppWindow was added in WinNT4. MinGW < 3.20? does not even have it in their .lib!
 #endif
 static BOOL IsHung(HWND hWnd)
 {
-#if !(defined(__MINGW32_MAJOR_VERSION) && !defined(__MINGW64_VERSION_MAJOR) && (__MINGW32_MINOR_VERSION <= 15))
+#if !(defined(__MINGW32_MAJOR_VERSION) && !defined(__MINGW64_VERSION_MAJOR) && (__MINGW32_MINOR_VERSION <= 15)) && !defined(NSIS_ISHUNG_DYNAMIC)
   if (sizeof(void*) > 4 || sizeof(TCHAR) > 1)
   {
     return IsHungAppWindow(hWnd);
