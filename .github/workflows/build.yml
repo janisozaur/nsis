@@ -43,7 +43,7 @@ jobs:
       - name: Build x86 stubs and plugins, test, stage dist
         if: startsWith(matrix.os, 'ubuntu')
         run: |
-          scons ZLIB_W32=$HOME/zlib SKIPUTILS="NSIS Menu" NSIS_CONFIG_LOG=${{ matrix.log }} \
+          scons -j"$(nproc)" ZLIB_W32=$HOME/zlib SKIPUTILS="NSIS Menu" NSIS_CONFIG_LOG=${{ matrix.log }} \
             TARGET_ARCH=x86 XGCC_W32_PREFIX=i686-w64-mingw32- \
             test dist-zip
 
@@ -60,7 +60,7 @@ jobs:
       - name: Build amd64 stubs and plugins
         if: startsWith(matrix.os, 'ubuntu')
         run: |
-          scons ZLIB_W32=$HOME/zlib-mingw-amd64 \
+          scons -j"$(nproc)" ZLIB_W32=$HOME/zlib-mingw-amd64 \
             APPEND_CPPPATH=$HOME/zlib-mingw-amd64/include APPEND_LIBPATH=$HOME/zlib-mingw-amd64/lib \
             SKIPUTILS="NSIS Menu" NSIS_CONFIG_LOG=${{ matrix.log }} \
             TARGET_ARCH=amd64 XGCC_W32_PREFIX=x86_64-w64-mingw32- \
@@ -69,7 +69,7 @@ jobs:
       - name: Build and test (macOS)
         if: startsWith(matrix.os, 'macos')
         run: |
-          scons ZLIB_W32=$HOME/zlib SKIPUTILS="NSIS Menu" NSIS_CONFIG_LOG=${{ matrix.log }} \
+          scons -j"$(sysctl -n hw.ncpu)" ZLIB_W32=$HOME/zlib SKIPUTILS="NSIS Menu" NSIS_CONFIG_LOG=${{ matrix.log }} \
             APPEND_CPPPATH=/opt/homebrew/include APPEND_LIBPATH=/opt/homebrew/lib \
             test dist-zip
 
@@ -112,7 +112,7 @@ jobs:
 
       - name: Build
         run: |
-          scons ZLIB_W32=$HOME/zlib SKIPUTILS="NSIS Menu" NSIS_CONFIG_LOG=${{ matrix.log }} APPEND_CPPPATH=$HOME/cppunit/include APPEND_LIBPATH=$HOME/cppunit/lib/release-win32 test dist
+          scons "-j$Env:NUMBER_OF_PROCESSORS" ZLIB_W32=$HOME/zlib SKIPUTILS="NSIS Menu" NSIS_CONFIG_LOG=${{ matrix.log }} APPEND_CPPPATH=$HOME/cppunit/include APPEND_LIBPATH=$HOME/cppunit/lib/release-win32 test dist
 
       - name: Config Errors
         if: failure()
@@ -121,7 +121,7 @@ jobs:
       - name: Nightly Build
         run: |
           rm nsis-*.zip
-          scons ZLIB_W32=$HOME/zlib SKIPUTILS="NSIS Menu" DOCTYPES=web dist-zip
+          scons "-j$Env:NUMBER_OF_PROCESSORS" ZLIB_W32=$HOME/zlib SKIPUTILS="NSIS Menu" DOCTYPES=web dist-zip
           echo https://github.com/$Env:GITHUB_REPOSITORY/actions/runs/$Env:GITHUB_RUN_ID > build.log
           ls -Name nsis-*.zip -OutVariable zip
           zip $zip build.log
