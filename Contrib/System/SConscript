@@ -43,14 +43,31 @@ src_ascpp = """
 	#endif
 """
 conf = env.Configure()
+have_asm = False
 if conf.TryCompile('END', '.S'):
 	files += ['Source/'+filename+'.S']
+	have_asm = True
 elif (not msvc) and conf.TryCompile(src_ascpp, '.S'):
 	files += ['Source/'+filename+'CPP.S']
+	have_asm = True
 elif (not msvc) and conf.TryCompile(src_ascpp, '.sx'):
 	files += ['Source/'+filename+'CPP.sx']
-else:
-	print('WARNING: System.dll: unable to find assembler for '+filename+'.S')
+	have_asm = True
+
+if not have_asm:
+	# Say what the message asks for and stop: this plugin is only the glue
+	# in Source/System.c, the whole calling convention machinery lives in
+	# Source/Call*.S, so without an assembler CallProc, CallBack and
+	# RealCallBack stay undefined and the link fails with
+	# "fatal error LNK1120: 3 unresolved externals" right after the
+	# warning. Skipping is what SKIPPLUGINS=System does by hand; the zstd
+	# stubs in SConstruct skip themselves on the same kind of toolchain
+	# gap. Toolchain note: ml.exe is not part of MSVC 6.0 Standard (it
+	# ships with the Processor Pack or a Platform SDK), while ml64.exe,
+	# armasm64.exe and mingw's as are part of the newer toolsets.
+	print('WARNING: System.dll: unable to find an assembler for '+filename+'.S, skipping this plug-in')
+	conf.Finish()
+	Return()
 conf.Finish()
 
 BuildPlugin(
