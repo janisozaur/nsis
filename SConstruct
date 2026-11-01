@@ -168,6 +168,7 @@ opts.Add(ListVariable('SKIPMISC', 'A list of plug-ins that will not be built', '
 opts.Add(ListVariable('SKIPDOC', 'A list of doc files that will not be built/installed', 'none', doc))
 opts.Add(('SKIPTESTS', 'A comma-separated list of test files that will not be ran', 'none'))
 opts.Add(('IGNORETESTS', 'A comma-separated list of test files that will be ran but ignored', ignore_tests))
+opts.Add(BoolVariable('SKIPCLEAN_DIST', 'Do not delete ZIPDISTDIR/INSTDISTDIR before building (allows multi-arch staging)', 'no'))
 # build tools
 opts.Add(('PATH', 'A colon-separated list of system paths instead of the default - TEMPORARY AND MAY DEPRECATE', None))
 opts.Add(('TOOLSET', 'A comma-separated list of specific tools used for building instead of the default', None))
@@ -385,9 +386,16 @@ if GetArcCPU(defenv) != 'x86':
 if 'CODESIGNER' in defenv:
 	defenv['DISTSUFFIX'] += '-signed'
 
-defenv.Execute(Delete('$ZIPDISTDIR'))
-defenv.Execute(Delete('$INSTDISTDIR'))
-defenv.Execute(Delete('$TESTDISTDIR'))
+if not defenv['SKIPCLEAN_DIST']:
+	defenv.Execute(Delete('$ZIPDISTDIR'))
+	defenv.Execute(Delete('$INSTDISTDIR'))
+	defenv.Execute(Delete('$TESTDISTDIR'))
+else:
+	# Multi-arch staging: keep the directories populated by a previous
+	# TARGET_ARCH pass so sequential invocations (TARGET_ARCH=x86, then
+	# amd64, then arm64, like debian/rules does with PREFIX_DEST) merge
+	# into one .instdist/nsis-$VERSION tree before `scons dist-installer`.
+	print('SKIPCLEAN_DIST: keeping ZIPDISTDIR/INSTDISTDIR/TESTDISTDIR from previous TARGET_ARCH pass(es)')
 
 def Distribute(files, names, component, path, subpath, alias, install_alias=None):
 	files = MakeFileList(files)
@@ -632,7 +640,8 @@ dist_zip = 'nsis-${VERSION}${DISTSUFFIX}.zip'
 zip_target = defenv.Zip(dist_zip, '$ZIPDISTDIR')
 defenv.Alias('dist-zip', zip_target)
 
-AlwaysBuild(defenv.AddPostAction(zip_target, Delete('$ZIPDISTDIR')))
+if not defenv['SKIPCLEAN_DIST']:
+	AlwaysBuild(defenv.AddPostAction(zip_target, Delete('$ZIPDISTDIR')))
 
 if defenv['PLATFORM'] == 'win32':
 	optchar = '/'
