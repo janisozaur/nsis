@@ -292,6 +292,21 @@ jobs:
           # plugin whose CallProc/CallBack/RealCallBack cannot resolve.
           scons "-j$Env:NUMBER_OF_PROCESSORS" MSTOOLKIT=yes MSVC_USE_SCRIPT=None MSVS_VERSION=6.0 TARGET_ARCH=x86 `
             ZLIB_W32=$HOME/zlib SKIPUTILS="NSIS Menu" utils stubs plugins
+          if ($LASTEXITCODE -ne 0) {
+            # scons -j can lose in cvtres: the VC6-era tool keeps its scratch
+            # files in %TEMP% under the name lnk<N> with no locking, and two
+            # rc/cvtres pairs started together (the UIs resources) pick the same
+            # one, which shows up as
+            #   CVTRES : fatal error CVT1108: cannot open ...\Temp\lnk3 for writing
+            #   build\urelease\UIs\modern_nodesc-rc.res : fatal error LNK1123: failure during conversion to COFF: file invalid or corrupt
+            #   scons: *** [build\urelease\UIs\modern_nodesc.exe] Error 1109
+            # Only the resource compiles race, and everything already built is
+            # up to date, so the serial retry costs a couple of minutes and only
+            # in the rare case where the parallel attempt lost the race.
+            Write-Output 'retrying serially (cvtres scratch file collision)'
+            scons -j1 MSTOOLKIT=yes MSVC_USE_SCRIPT=None MSVS_VERSION=6.0 TARGET_ARCH=x86 `
+              ZLIB_W32=$HOME/zlib SKIPUTILS="NSIS Menu" utils stubs plugins
+          }
 
       - name: Verify VC6 outputs
         shell: pwsh
