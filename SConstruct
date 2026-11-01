@@ -477,18 +477,21 @@ def Sign(targets):
 			defenv.AddPostAction(t, a)
 
 Import('SilentActionEcho IsPEExecutable SetPESecurityFlagsWorker SetPEMinOS MakeReproducibleAction')
-def SetPESecurityFlagsAction(target, source, env):
-	for t in target:
-		SetPESecurityFlagsWorker(t.path)
+def MakeSetPESecurityFlagsAction(no_seh):
+	def action(target, source, env):
+		for t in target:
+			SetPESecurityFlagsWorker(t.path, no_seh)
+	return action
 g_pesecflagsecho = {}
 def SetPESecurityFlagsActionEcho(target, source, env):
 	for t in target:
-		if t.name[-4:].lower() == '.dll' and IsPEExecutable(t.path) and not t.path in g_pesecflagsecho:
+		if IsPEExecutable(t.path) and not t.path in g_pesecflagsecho:
 			g_pesecflagsecho[t.path] = 1
 			print('Setting PE flags on %s' % t.name)
-def SetPESecurityFlags(targets):
+def SetPESecurityFlags(targets, no_seh=True):
+	action = MakeSetPESecurityFlagsAction(no_seh)
 	for t in targets:
-		a = defenv.Action(SetPESecurityFlagsAction, strfunction=SetPESecurityFlagsActionEcho)
+		a = defenv.Action(action, strfunction=SetPESecurityFlagsActionEcho)
 		defenv.AddPostAction(t, a)
 
 def SetTargetPEMinOS(target, source=None, env=None):
@@ -768,6 +771,7 @@ makensis = defenv.SConscript(dirs = 'Source', variant_dir = build_dir, duplicate
 
 makensis_env.SideEffect('%s/makensis.map' % build_dir, makensis)
 
+defenv.SetPESecurityFlags(makensis, no_seh=False) # makensis uses C++ exceptions; SEH stays allowed
 defenv.MakeReproducible(makensis)
 defenv.Alias('makensis', makensis)
 
@@ -904,6 +908,7 @@ def BuildUtil(target, source, libs, entry = None, res = None,
 
 	if (str(target)[:7]).lower() == 'RegTool'.lower():
 		defenv.SetTargetPEMinOS(util)
+	defenv.SetPESecurityFlags(util, no_seh=False) # utils may use C++ exceptions; SEH stays allowed
 	defenv.MakeReproducible(util)
 	defenv.Sign(util)
 

@@ -244,9 +244,11 @@ def IsPEExecutable(pe):
 	if not isinstance(pe, MSPE): pe = MSPE(pe)
 	if IsPE(pe) and int(pe.ReadCharacteristics() or 0) & 0x0002: return True # IMAGE_FILE_EXECUTABLE_IMAGE?
 
-def SetPESecurityFlagsWorker(filepath):
+def SetPESecurityFlagsWorker(filepath, no_seh=True):
 	"""
-	Sets the [HE]ASLR, DEP and LAA flags in the PE header
+	Sets the [HE]ASLR, DEP and LAA flags in the PE header.
+	no_seh=False skips claiming IMAGE_DLLCHARACTERISTICS_NO_SEH; required
+	for executables that use C++ exceptions (SEH-based on x86) like makensis.
 	"""
 	pe = MSPE(filepath, open_for_write=True)
 	try:
@@ -256,7 +258,7 @@ def SetPESecurityFlagsWorker(filepath):
 		pe.WriteCharacteristics(ifh_c)
 		ioh_dc = pe.ReadDllCharacteristics()
 		ioh_dc |= 0x0100 # +IMAGE_DLLCHARACTERISTICS_NX_COMPAT (DEP)
-		if pe.ReadMachine() != 0xaa64: # ARM64 forces exception directory?
+		if no_seh and pe.ReadMachine() != 0xaa64: # ARM64 forces exception directory?
 			ioh_dc |= 0x0400 # +IMAGE_DLLCHARACTERISTICS_NO_SEH
 		ioh_dc |= 0x8000 # +IMAGE_DLLCHARACTERISTICS_TERMINAL_SERVER_AWARE (TODO: Should we set this on .DLLs?)
 		if not (ifh_c & 0x0001): # IMAGE_FILE_RELOCS_STRIPPED?
