@@ -150,6 +150,12 @@ jobs:
             APPEND_CPPPATH=$HOME/cppunit/include APPEND_LIBPATH=$HOME/cppunit/lib/release-win32 `
             test dist
 
+      - name: Verify PE security flags
+        shell: pwsh
+        run: |
+          pip install pefile
+          python -c "import pefile,sys; pe=pefile.PE('build/urelease/makensis/makensis.exe'); ch=pe.FILE_HEADER.Characteristics; dc=pe.OPTIONAL_HEADER.DllCharacteristics; p=pefile.PE('build/urelease/AdvSplash/x86-unicode/AdvSplash.dll'); dc2=p.OPTIONAL_HEADER.DllCharacteristics; checks=[('makensis LARGE_ADDRESS_AWARE',ch&0x0020),('makensis NX_COMPAT',dc&0x0100),('makensis DYNAMIC_BASE',dc&0x0040),('makensis TERMINAL_SERVER_AWARE',dc&0x8000),('makensis does not claim NO_SEH',not (dc&0x0400)),('plugin NX_COMPAT',dc2&0x0100),('plugin keeps NO_SEH',dc2&0x0400)]; [print(('ok   ' if ok else 'FAIL ')+n) for n,ok in checks]; sys.exit(any(not ok for _,ok in checks))"
+
       - name: Nightly Build
         run: |
           rm nsis-*.zip
