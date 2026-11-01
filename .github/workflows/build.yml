@@ -11,7 +11,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04, macos-15, macos-26]
+        # macos-15 parked: it runs exactly the same commands as macos-26
+        # (host tools plus a mingw cross pass), but its jobs measured
+        # 2m14s-15m01s over the recent runs against 2m02s-4m41s for
+        # macos-26, and its runners queue far behind, which holds whole
+        # runs in "queued". The long tail is also above the job cap, so
+        # it would fail healthy builds. Restore when runner capacity
+        # settles or when something macOS specific needs covering.
+        os: [ubuntu-22.04, ubuntu-24.04, macos-26] # macos-15 parked
         log: [yes, no]
     runs-on: ${{ matrix.os }}
     steps:
