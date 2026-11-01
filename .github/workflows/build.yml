@@ -137,13 +137,18 @@ jobs:
           mkdir -p $HOME/zlib
           unzip -o $HOME/zlib.zip -d $HOME/zlib
 
-      - name: Build
-        run: |
-          scons "-j$Env:NUMBER_OF_PROCESSORS" ZLIB_W32=$HOME/zlib SKIPUTILS="NSIS Menu" NSIS_CONFIG_LOG=${{ matrix.log }} APPEND_CPPPATH=$HOME/cppunit/include APPEND_LIBPATH=$HOME/cppunit/lib/release-win32 test dist
+      - name: Setup MSVC x86 environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
 
-      - name: Config Errors
-        if: failure()
-        run: cat config.log
+      - name: Build and test x86 (MSVC)
+        shell: pwsh
+        run: |
+          scons "-j$Env:NUMBER_OF_PROCESSORS" MSTOOLKIT=yes MSVC_USE_SCRIPT=None MSVS_VERSION=14.3 TARGET_ARCH=x86 `
+            ZLIB_W32=$HOME/zlib SKIPUTILS="NSIS Menu" NSIS_CONFIG_LOG=${{ matrix.log }} `
+            APPEND_CPPPATH=$HOME/cppunit/include APPEND_LIBPATH=$HOME/cppunit/lib/release-win32 `
+            test dist
 
       - name: Nightly Build
         run: |
@@ -160,6 +165,150 @@ jobs:
           name: build.zip
           path: nsis-*.zip
         if: matrix.log == 'no' && matrix.os == 'windows-2022' && github.ref == 'refs/heads/master' && github.repository == 'nsis-dev/nsis'
+
+      - name: Setup x64 zlib import library (vcpkg)
+        shell: pwsh
+        run: |
+          vcpkg install zlib:x64-windows
+          $root = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows"
+          $dst = "$HOME/zlib-x64"
+          New-Item -ItemType Directory -Force "$dst/lib" | Out-Null
+          Copy-Item "$root/include" -Destination "$dst/include" -Recurse -Force
+          # vcpkg's zlib port names the import library after the DLL it came
+          # from and that has moved around between releases, so look it up
+          # instead of hard-coding installed/x64-windows/lib/zlib.lib
+          $imp = Get-ChildItem "$root" -Recurse -Filter '*.lib' |
+            Where-Object { $_.BaseName -like 'z*' } | Select-Object -First 1
+          if (-not $imp) {
+            Get-ChildItem "$root" -Recurse -File | Select-Object -ExpandProperty FullName
+            Write-Error 'no zlib import library found under installed/x64-windows'
+            exit 1
+          }
+          Copy-Item $imp.FullName -Destination "$dst/lib/zdll.lib"
+          $dll = Get-ChildItem "$root" -Recurse -Filter '*.dll' |
+            Where-Object { $_.BaseName -like 'z*' } | Select-Object -First 1
+          if ($dll) { Copy-Item $dll.FullName -Destination "$dst/" }
+          Write-Output "import lib: $($imp.Name); runtime: $($dll.Name)"
+
+      - name: Setup MSVC amd64 environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Build amd64 stubs and plugins (MSVC amd64)
+        shell: pwsh
+        run: |
+          scons "-j$Env:NUMBER_OF_PROCESSORS" MSTOOLKIT=yes MSVC_USE_SCRIPT=None MSVS_VERSION=14.3 TARGET_ARCH=amd64 `
+            ZLIB_W32=$HOME/zlib-x64 SKIPUTILS="NSIS Menu" NSIS_CONFIG_LOG=${{ matrix.log }} `
+            stubs plugins
+
+      - name: Verify amd64 MSVC outputs
+        shell: pwsh
+        run: |
+          $stub = Get-ChildItem build -Recurse -File -Filter 'stub_lzma.exe' | Where-Object { $_.Directory.Name -eq 'stub_lzma-amd64-unicode' } | Select-Object -First 1
+          if (-not $stub) { Write-Error 'no MSVC-built amd64 lzma stub found under build/'; exit 1 }
+          $plugin = Get-ChildItem build -Recurse -File -Filter '*.dll' | Where-Object { $_.Directory.Name -eq 'amd64-unicode' } | Select-Object -First 1
+          if (-not $plugin) { Write-Error 'no MSVC-built amd64 plugin DLL found under build/'; exit 1 }
+
+      - name: Config Errors
+        if: failure()
+        run: cat config.log
+
+  vc6-tools:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Extract Visual C++ 6.0 tools from giulioz/vc6-docker
+        run: |
+          docker pull giulioz/vc6-docker
+          id=$(docker create giulioz/vc6-docker)
+          mkdir -p vc6
+          docker cp "$id:/opt/vc/BIN" vc6/BIN
+          docker cp "$id:/opt/vc/INCLUDE" vc6/INCLUDE
+          docker cp "$id:/opt/vc/LIB" vc6/LIB
+          docker rm "$id"
+          ls vc6/BIN | head
+
+      - name: Upload VC6 toolchain
+        uses: actions/upload-artifact@v7
+        with:
+          name: vc6-tools
+          path: vc6/
+
+  vc6:
+    needs: [vc6-tools]
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Checkout VC6 Platform SDK
+        uses: actions/checkout@v6
+        with:
+          repository: sjk7/VC6-Platform-SDK
+          path: sdk
+
+      - name: Download VC6 toolchain
+        uses: actions/download-artifact@v8
+        with:
+          name: vc6-tools
+          path: vc6
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+
+      - name: Install scons
+        run: pip install scons
+
+      - name: Zlib Dependency
+        run: |
+          curl --retry 9 -sLo $HOME/zlib.zip "https://downloads.sourceforge.net/project/libpng/zlib/1.2.8/zlib128-dll.zip?r=&ts=1403402496&use_mirror=hivelocity"
+          mkdir -p $HOME/zlib
+          unzip -o $HOME/zlib.zip -d $HOME/zlib
+
+      - name: Build with VC6 (MSVS_VERSION=6.0 + VC6 Platform SDK)
+        shell: pwsh
+        run: |
+          $Env:PATH = "$PWD\vc6\BIN;$Env:PATH"
+          # the SDK repository nests everything in a second VC6PLATSDK directory
+          $Env:INCLUDE = "$PWD\sdk\VC6PLATSDK\include;$PWD\vc6\INCLUDE"
+          $Env:LIB = "$PWD\sdk\VC6PLATSDK\Lib;$PWD\vc6\LIB"
+          foreach ($f in @("$PWD\vc6\BIN\cl.exe", "$PWD\sdk\VC6PLATSDK\include\windows.h",
+                           "$PWD\vc6\INCLUDE\stdio.h", "$PWD\vc6\LIB\libc.lib")) {
+            if (-not (Test-Path $f)) { Write-Error "missing toolchain file: $f"; exit 1 }
+          }
+          (Get-Command cl.exe).Source
+          # makensis and dist-zip are deliberately out of scope here: makensis
+          # compiles the bundled zstd (Source/zstd), whose headers need
+          # `long long` and __declspec(deprecated), so it needs VS2005 or
+          # newer. VC6 does have to keep building the release stubs, the
+          # plugins and the Bin/ utilities, which is what this job checks.
+          # The System plugin is the one exception: this toolset has no
+          # ml.exe (MASM shipped separately from MSVC 6.0 Standard), and
+          # Contrib/System/SConscript skips itself rather than linking a
+          # plugin whose CallProc/CallBack/RealCallBack cannot resolve.
+          scons "-j$Env:NUMBER_OF_PROCESSORS" MSTOOLKIT=yes MSVC_USE_SCRIPT=None MSVS_VERSION=6.0 TARGET_ARCH=x86 `
+            ZLIB_W32=$HOME/zlib SKIPUTILS="NSIS Menu" utils stubs plugins
+
+      - name: Verify VC6 outputs
+        shell: pwsh
+        run: |
+          $stub = Get-ChildItem build -Recurse -File -Filter 'stub_*.exe' |
+            Where-Object { $_.Directory.Name -like '*-x86-unicode' } | Select-Object -First 1
+          if (-not $stub) { Write-Error 'no VC6-built stub found under build/'; exit 1 }
+          $plugin = Get-ChildItem build -Recurse -File -Filter '*.dll' |
+            Where-Object { $_.Directory.Name -eq 'x86-unicode' } | Select-Object -First 1
+          if (-not $plugin) { Write-Error 'no VC6-built plugin DLL found under build/'; exit 1 }
+          $util = Get-ChildItem build -Recurse -File -Filter 'zip2exe.exe' | Select-Object -First 1
+          if (-not $util) { Write-Error 'no VC6-built zip2exe.exe found under build/'; exit 1 }
+          Write-Output "stub: $($stub.FullName)"; Write-Output "plugin: $($plugin.FullName)"; Write-Output "util: $($util.FullName)"
+
+      - name: Config Errors
+        if: failure()
+        run: cat config.log
 
   nightly:
     if: github.ref == 'refs/heads/master' && github.repository == 'nsis-dev/nsis'
