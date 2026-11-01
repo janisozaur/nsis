@@ -145,12 +145,26 @@ void *realloc(void *ptr, size_t size)
  * /alternatename nor a C99 compiler for zstd 1.5.7: skip the zstd stubs
  * there (SKIPSTUBS=zstd, automatic in SConstruct) instead of breaking them.
  */
+#if defined(_M_AMD64) || defined(_M_ARM64) || defined(_M_ARM64EC)
+/* amd64 and arm64 C symbols carry no leading underscore: the helper the
+ * compiler emits is called by its source name (_byteswap_ulong) and our
+ * replacement shows up as nsis_byteswap_ulong.  The x86 spellings below,
+ * with the __cdecl underscore added, are what a 32-bit object file asks
+ * for, so using them here leaves the amd64 stubs unresolved.
+ * 64-bit targets have native multiply and shift instructions, so only the
+ * rotate and byteswap helpers are ever referenced. */
+#pragma comment(linker, "/alternatename:_rotl=nsis_rotl")
+#pragma comment(linker, "/alternatename:_rotl64=nsis_rotl64")
+#pragma comment(linker, "/alternatename:_byteswap_ulong=nsis_byteswap_ulong")
+#pragma comment(linker, "/alternatename:_byteswap_uint64=nsis_byteswap_uint64")
+#else
 #pragma comment(linker, "/alternatename:__rotl=_nsis_rotl")
 #pragma comment(linker, "/alternatename:__rotl64=_nsis_rotl64")
 #pragma comment(linker, "/alternatename:__byteswap_ulong=_nsis_byteswap_ulong")
 #pragma comment(linker, "/alternatename:__byteswap_uint64=_nsis_byteswap_uint64")
 #pragma comment(linker, "/alternatename:__allmul=_nsis_allmul")
 #pragma comment(linker, "/alternatename:__allshl=_nsis_allshl")
+#endif
 
 unsigned int nsis_rotl(unsigned int val, int shift) {
   shift &= 31;
