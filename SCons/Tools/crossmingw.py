@@ -68,6 +68,10 @@ prefixes64 = SCons.Util.Split("""
     x86_64-w64-mingw32-
 """)
 
+prefixes_arm64 = SCons.Util.Split("""
+    aarch64-w64-mingw32-
+""")
+
 def find(env):
     # Explicitly specified toolchain to build Windows executables
     # takes predominance.
@@ -75,9 +79,11 @@ def find(env):
     prefixes = prefixes32
     if env['TARGET_ARCH'] == 'amd64':
         prefixes = prefixes64
+    elif env['TARGET_ARCH'] == 'arm64':
+        prefixes = prefixes_arm64
 
     if prefix:
-        prefixes.insert(0, prefix)
+        prefixes = [prefix] + list(prefixes)
     for prefix in prefixes:
         # First search in the SCons path and then the OS path:
         if env.WhereIs(prefix + 'gcc') or SCons.Util.WhereIs(prefix + 'gcc'):

@@ -227,13 +227,29 @@ conf.Finish()
 # sure the sections will be written in the correct order.
 #
 
-petype = 'pei-i386'
-if defenv['TARGET_ARCH'] == 'amd64':
-	petype = 'pei-x86-64'
-stub_env.Append(LINKFLAGS = ['-B', petype]) # --oformat petype also works in GCC 4.5.2
-stub_uenv.Append(LINKFLAGS = ['-B', petype])
-stub_env.Append(LINKFLAGS = ['-T', File('linker_script').rfile()])
-stub_uenv.Append(LINKFLAGS = ['-T', File('linker_script').rfile()])
+petype = {'x86': 'pei-i386', 'amd64': 'pei-x86-64', 'arm64': 'pei-aarch64-little'}.get(defenv['TARGET_ARCH'], 'pei-i386')
+if defenv['TARGET_ARCH'] == 'arm64':
+	# AArch64 PE support in binutils is young and inconsistent: the mingw-w64
+	# binutils fork uses the pei-aarch64-little emulation while upstream
+	# binutils uses arm64pep, and this i386-oriented linker script may be
+	# rejected. Probe the exact combination; if the linker refuses it we
+	# rely on the linker's default section layout (makensis' stub checks
+	# will flag a misplaced .ndata).
+	conf = FlagsConfigure(stub_env)
+	arm64_linker_ok = conf.CheckLinkFlag('-B %s -T %s' % (petype, File('linker_script').rfile()))
+	conf.Finish()
+	if arm64_linker_ok:
+		stub_env.Append(LINKFLAGS = ['-B', petype])
+		stub_uenv.Append(LINKFLAGS = ['-B', petype])
+		stub_env.Append(LINKFLAGS = ['-T', File('linker_script').rfile()])
+		stub_uenv.Append(LINKFLAGS = ['-T', File('linker_script').rfile()])
+	else:
+		print('WARNING: the arm64 linker rejected "-B %s -T linker_script", using default section layout for arm64 stubs; verify .ndata placement' % petype)
+else:
+	stub_env.Append(LINKFLAGS = ['-B', petype]) # --oformat petype also works in GCC 4.5.2
+	stub_uenv.Append(LINKFLAGS = ['-B', petype])
+	stub_env.Append(LINKFLAGS = ['-T', File('linker_script').rfile()])
+	stub_uenv.Append(LINKFLAGS = ['-T', File('linker_script').rfile()])
 
 
 #
