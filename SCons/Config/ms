@@ -206,6 +206,20 @@ plugin_env.Append(LINKFLAGS = ['$MAP_FLAG'])       # generate map file
 plugin_uenv = plugin_env.Clone()
 plugin_uenv.Append(CPPDEFINES = ['_UNICODE', 'UNICODE'])
 
+### modern MSVC & 64-bit code generation
+
+# VS2015 (14.0) made function-local statics thread-safe by calling CRT TLS
+# helpers (_Init_thread_header/_Init_thread_footer) that cannot be resolved
+# in /NODEFAULTLIB stubs and plugins; disable the guard (stubs are
+# single-threaded during static init anyway).
+if msvs_version >= 14.0:
+	for _env in (stub_env, stub_uenv, plugin_env, plugin_uenv):
+		_env.Append(CCFLAGS = ['/Zc:threadSafeInit-'])
+	# /Gw: whole-program optimization of globals, shrinks stub/plugin data
+	if defenv['TARGET_ARCH'] in ('amd64', 'arm64'):
+		for _env in (stub_env, stub_uenv, plugin_env, plugin_uenv):
+			_env.Append(CCFLAGS = ['/Gw'])
+
 ### util environment
 
 util_env = tdefenv.Clone()
@@ -309,19 +323,33 @@ conf.Finish()
 
 #
 # MSVC 2005 requires the memset CRT function to be present
-# and the stubs might need memcpy (entry struct copy on x64)
-# BUGBUG: The tests are currently broken on x64 and designed to fail!
+# and the stubs might need memcpy (entry struct copy on x64).
+# Probe the compiler's real intrinsic-vs-call behaviour: compile the test
+# with the *stub* environment (same /O1 etc. as the real stubs) under
+# /NODEFAULTLIB. A link failure means the compiler referenced the CRT
+# symbol, so we supply our own memcpy.c/memset.c for those objects.
 #
 
-conf = defenv.Configure(custom_tests = { 'CheckRequirement' : check_requirement })
-if conf.CheckRequirement('memset', 'char c[128] = "test";switch(sizeof(void*)){case 8:break;case sizeof(void*):return 1;}'):
+conf = stub_env.Configure(custom_tests = { 'CheckRequirement' : check_requirement })
+
+memset_test = """
+	char c[128] = "test";
+	c[0] = '6'; // prevent c from being optimized out
+	return c[1];
+"""
+
+memcpy_test = """
+	struct nsis_probe { char c[128]; } t = { "test" }, u;
+	u = t; // struct copy: MSVC x64 emits a memcpy call for this
+	u.c[0] = '6'; // prevent u from being optimized out
+	return u.c[1];
+"""
+
+if conf.CheckRequirement('memset', memset_test):
 	add_file('memset.c', 'memset')
 	stub_env.Append(CPPDEFINES = ['_NSIS_NODEFLIB_CRTMEMSET'])
 	stub_uenv.Append(CPPDEFINES = ['_NSIS_NODEFLIB_CRTMEMSET'])
 
-memcpy_test = """
-switch(sizeof(void*)){case 8:break;case sizeof(void*):return 1;}
-"""
 if conf.CheckRequirement('memcpy', memcpy_test):
 	add_file('memcpy.c', 'memcpy')
 	stub_env.Append(CPPDEFINES = ['_NSIS_NODEFLIB_CRTMEMCPY'])

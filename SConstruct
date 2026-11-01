@@ -173,7 +173,11 @@ opts.Add(BoolVariable('SKIPCLEAN_DIST', 'Do not delete ZIPDISTDIR/INSTDISTDIR be
 opts.Add(('PATH', 'A colon-separated list of system paths instead of the default - TEMPORARY AND MAY DEPRECATE', None))
 opts.Add(('TOOLSET', 'A comma-separated list of specific tools used for building instead of the default', None))
 opts.Add(BoolVariable('MSTOOLKIT', 'Use Microsoft Visual C++ Toolkit', 'no'))
-opts.Add(EnumVariable('MSVS_VERSION', 'MS Visual C++ version', os.environ.get('MSVS_VERSION'), allowed_values=('6.0', '7.0', '7.1', '8.0', '8.0Exp', '9.0', '9.0Exp', '10.0', '10.0Exp')))
+# Up to 10.0/10.0Exp = Visual Studio 2010 and older (VC6 = 6.0 stays supported).
+# 14.x = MSVC toolset series of VS2015 (14.0), VS2017 (14.1), VS2019 (14.2),
+# VS2022 (14.3) and VS2022 17.10+/VS2025 (14.4+), understood by SCons >= 4 via
+# the deprecated-but-honored MSVS_VERSION -> MSVC_VERSION passthrough.
+opts.Add(EnumVariable('MSVS_VERSION', 'MS Visual C++ version', os.environ.get('MSVS_VERSION'), allowed_values=('6.0', '7.0', '7.1', '8.0', '8.0Exp', '9.0', '9.0Exp', '10.0', '10.0Exp', '11.0', '11.0Exp', '12.0', '14.0', '14.1', '14.2', '14.3', '14.4', '14.5')))
 opts.Add(EnumVariable('TARGET_ARCH', 'Target processor architecture', 'x86', allowed_values=('x86', 'amd64', 'arm64')))
 opts.Add(ListVariable('DOCTYPES', 'A list of document types that will be built', default_doctype, doctypes))
 opts.Add(('CC', 'Override C compiler', None))
