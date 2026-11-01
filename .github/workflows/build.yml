@@ -220,6 +220,181 @@ jobs:
         if: failure()
         run: cat config.log
 
+  # First arm64 pass, informational: builds the arm64 target with MSVC on a
+  # native Windows ARM64 runner.  Non-blocking (continue-on-error) because
+  # arm64 is not part of the Phase 1 release surface; the purpose of this job
+  # is to learn, in one run, how far the existing MSVC path gets on arm64.
+  # Why the mingw route is not used here (measured, do not retry blindly):
+  #   - Ubuntu has no aarch64 mingw-w64 toolchain in any suite: apt-cache finds
+  #     no gcc/g++/binutils-mingw-w64-aarch64 on ubuntu-22.04, ubuntu-24.04,
+  #     ubuntu-24.04-arm or ubuntu-26.04-arm, and packages.ubuntu.com has no
+  #     such package for any suite/arch.  conda-forge has no
+  #     mingw-w64-aarch64-* packages; Homebrew's mingw-w64 formula builds only
+  #     i686 and x86_64 (target_archs).
+  #   - llvm-mingw does ship aarch64-w64-mingw32-{gcc,g++,as,ar,ranlib,windres},
+  #     but it links with lld: it rejects -Wl,--exclude-libs (used by
+  #     SCons/Config/gnu) and silently ignores -B pei-aarch64-little and
+  #     -T SCons/Config/linker_script, so the section order NSIS stubs depend
+  #     on is not enforced.  The arm64 linker probe in SCons/Config/gnu
+  #     correctly reports failure and falls back to the default layout.
+  # Runner facts this job is written against (image windows-11-vs2026-arm64):
+  #   arch=ARM64, VS 2026 with MSVC toolsets 14.29/14.44/14.51 and
+  #   bin\Hostarm64\arm64\ml64.exe for 14.44/14.51, C:\vcpkg present, scons is
+  #   not preinstalled.  SCons 4.11 maps VS major 18 to VC '14.5', hence
+  #   MSVS_VERSION=14.5 below.
+  arm64-msvc:
+    runs-on: windows-11-arm
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+
+      - name: Install build tools
+        shell: pwsh
+        run: pip install scons pefile
+
+      - name: Toolchain inventory
+        shell: pwsh
+        run: |
+          echo "arch=$env:PROCESSOR_ARCHITECTURE number_of_processors=$Env:NUMBER_OF_PROCESSORS"
+          (python --version) 2>&1
+          (scons --version) 2>&1 | Select-Object -First 3
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vswhere) {
+            & $vswhere -latest -prerelease -products * -property installationPath
+            & $vswhere -latest -prerelease -products * -property installationVersion
+          } else { Write-Warning 'no vswhere' }
+          $msvc = 'C:\Program Files*\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin'
+          echo "--- arm64 toolsets (cl/link/lib/rc/ml64):"
+          foreach ($bin in (Get-ChildItem $msvc -Directory -ErrorAction SilentlyContinue)) {
+            $t = $bin.Parent.Name
+            foreach ($hostdir in @('Hostarm64\arm64', 'Hostx64\arm64')) {
+              $tools = @('cl', 'link', 'lib', 'rc', 'ml64') |
+                Where-Object { Test-Path (Join-Path $bin.FullName "$hostdir\$_.exe") }
+              if ($tools) { Write-Output "$t $hostdir -> $($tools -join ' ')" }
+            }
+          }
+          echo "VCPKG_INSTALLATION_ROOT=$env:VCPKG_INSTALLATION_ROOT"
+        continue-on-error: true
+
+      - name: Setup MSVC arm64 environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: arm64
+
+      - name: Setup arm64 zlib import library (vcpkg)
+        shell: pwsh
+        run: |
+          vcpkg install zlib:arm64-windows
+          if (-not $env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT = 'C:\vcpkg' }
+          $root = "$env:VCPKG_INSTALLATION_ROOT/installed/arm64-windows"
+          $dst = "$HOME/zlib-arm64"
+          New-Item -ItemType Directory -Force "$dst/lib" | Out-Null
+          Copy-Item "$root/include" -Destination "$dst/include" -Recurse -Force
+          # same lookup as the x64 pass: the port's import library name has
+          # moved between releases, so search instead of hard-coding lib/zlib.lib
+          $imp = Get-ChildItem "$root" -Recurse -Filter '*.lib' |
+            Where-Object { $_.BaseName -like 'z*' } | Select-Object -First 1
+          if (-not $imp) {
+            Get-ChildItem "$root" -Recurse -File | Select-Object -ExpandProperty FullName
+            Write-Error 'no zlib import library found under installed/arm64-windows'
+            exit 1
+          }
+          Copy-Item $imp.FullName -Destination "$dst/lib/zdll.lib"
+          $dll = Get-ChildItem "$root" -Recurse -Filter '*.dll' |
+            Where-Object { $_.BaseName -like 'z*' } | Select-Object -First 1
+          if ($dll) { Copy-Item $dll.FullName -Destination "$dst/" }
+          Write-Output "import lib: $($imp.Name); runtime: $($dll.Name)"
+
+      - name: Build makensis (MSVC arm64)
+        shell: pwsh
+        run: |
+          scons "-j$Env:NUMBER_OF_PROCESSORS" MSTOOLKIT=yes MSVC_USE_SCRIPT=None MSVS_VERSION=14.5 `
+            TARGET_ARCH=arm64 ZLIB_W32=$HOME/zlib-arm64 SKIPUTILS="NSIS Menu" makensis
+
+      - name: Build arm64 stubs (MSVC arm64)
+        shell: pwsh
+        run: |
+          scons "-j$Env:NUMBER_OF_PROCESSORS" MSTOOLKIT=yes MSVC_USE_SCRIPT=None MSVS_VERSION=14.5 `
+            TARGET_ARCH=arm64 ZLIB_W32=$HOME/zlib-arm64 SKIPUTILS="NSIS Menu" stubs
+
+      - name: Build arm64 plugins (MSVC arm64)
+        shell: pwsh
+        run: |
+          scons "-j$Env:NUMBER_OF_PROCESSORS" MSTOOLKIT=yes MSVC_USE_SCRIPT=None MSVS_VERSION=14.5 `
+            TARGET_ARCH=arm64 ZLIB_W32=$HOME/zlib-arm64 SKIPUTILS="NSIS Menu" plugins
+
+      - name: Verify arm64 MSVC outputs
+        shell: pwsh
+        run: |
+          $stub = Get-ChildItem build -Recurse -File -Filter 'stub_lzma.exe' |
+            Where-Object { $_.Directory.Name -eq 'stub_lzma-arm64-unicode' } | Select-Object -First 1
+          if (-not $stub) { Write-Error 'no MSVC-built arm64 lzma stub found under build/'; exit 1 }
+          $plugin = Get-ChildItem build -Recurse -File -Filter '*.dll' |
+            Where-Object { $_.Directory.Name -eq 'arm64-unicode' } | Select-Object -First 1
+          if (-not $plugin) { Write-Error 'no MSVC-built arm64 plugin DLL found under build/'; exit 1 }
+          Set-Content -Path check-arm64.py -Encoding ascii -Value @(
+            'import glob, pefile, sys',
+            'paths = [r"build/urelease/makensis/makensis.exe"]',
+            'paths += glob.glob("build/urelease/stub_*-arm64-unicode/stub_*.exe")[:2]',
+            'paths += glob.glob("build/urelease/*/arm64-unicode/*.dll")[:3]',
+            'bad = []',
+            'for p in paths:',
+            '    pe = pefile.PE(p)',
+            '    names = [s.Name.rstrip(b"\x00").decode("ascii", "replace") for s in pe.sections]',
+            '    print("%-70s machine=0x%04X %s" % (p, pe.FILE_HEADER.Machine, names))',
+            '    if pe.FILE_HEADER.Machine != 0xAA64: bad.append("wrong machine: " + p)',
+            '    if "stub" in p and ".ndata" not in names: bad.append("stub has no .ndata: " + p)',
+            'if len(paths) < 4: bad.append("too few outputs inspected: %d" % len(paths))',
+            'print("bad: %r" % bad)',
+            'sys.exit(1 if bad else 0)'
+          )
+          python check-arm64.py
+
+      - name: Smoke test an arm64 installer (informational)
+        shell: pwsh
+        run: |
+          scons "-j$Env:NUMBER_OF_PROCESSORS" MSTOOLKIT=yes MSVC_USE_SCRIPT=None MSVS_VERSION=14.5 `
+            TARGET_ARCH=arm64 ZLIB_W32=$HOME/zlib-arm64 SKIPUTILS="NSIS Menu" DOCTYPES=web dist-zip
+          $dist = Get-ChildItem -Directory -Filter 'nsis-*' | Select-Object -First 1
+          if (-not $dist -or -not (Test-Path "$($dist.FullName)\makensis.exe")) {
+            Write-Warning 'no staged dist dir (nsis-*/makensis.exe), smoke test skipped'
+            exit 0
+          }
+          $env:NSISDIR = $dist.FullName
+          Set-Content -Path payload.txt -Encoding ascii -Value 'arm64 smoke payload'
+          Set-Content -Path smoke.nsi -Encoding ascii -Value @(
+            'Unicode true',
+            'Name "arm64 smoke"',
+            'OutFile "smoke-setup.exe"',
+            'RequestExecutionLevel user',
+            'InstallDir "$LOCALAPPDATA\arm64-smoke"',
+            'Section',
+            '  File "payload.txt"',
+            'SectionEnd'
+          )
+          & "$($dist.FullName)\makensis.exe" /V2 smoke.nsi
+          if (-not (Test-Path smoke-setup.exe)) { Write-Error 'makensis produced no installer'; exit 1 }
+          Start-Process -FilePath .\smoke-setup.exe -ArgumentList '/S' -NoNewWindow -Wait
+          $installed = "$env:LOCALAPPDATA\arm64-smoke\payload.txt"
+          if (Test-Path $installed) {
+            Write-Output "SMOKE OK: arm64 stub installed $(Get-Content $installed)"
+          } else {
+            Write-Error "arm64 installer ran but did not install $installed"
+            exit 1
+          }
+        continue-on-error: true
+
+      - name: Config Errors
+        if: failure()
+        run: cat config.log
+
   vc6-tools:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
