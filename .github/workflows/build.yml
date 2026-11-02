@@ -541,6 +541,25 @@ jobs:
           }
         continue-on-error: true
 
+      # Nothing in this job gates anything, and a failing arm64 image is
+      # easier to look at somewhere with more tools than a runner: the zip is a
+      # complete arm64 build (Bin\makensis.exe, Stubs, Plugins) and
+      # smoke-setup.exe is the exact file the step above tried to start, with
+      # the script and payload that produced it.
+      - name: Upload arm64 build (informational)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nsis-arm64-msvc
+          path: |
+            nsis-*.zip
+            smoke-setup.exe
+            smoke.nsi
+            payload.txt
+            peinfo.py
+          retention-days: 14
+          if-no-files-found: warn
+
       - name: Config Errors
         if: failure()
         run: cat config.log
