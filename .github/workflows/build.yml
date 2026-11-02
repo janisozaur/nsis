@@ -318,27 +318,42 @@ jobs:
           scons "-j$Env:NUMBER_OF_PROCESSORS" MSTOOLKIT=yes MSVC_USE_SCRIPT=None MSVS_VERSION=14.5 `
             TARGET_ARCH=arm64 ZLIB_W32=$HOME/zlib-arm64 SKIPUTILS="NSIS Menu" makensis
 
-      # Tells apart "the shipped makensis cannot find its zlib runtime" from
-      # "the zlib runtime itself cannot load" and "the SubStart wrapper dies",
-      # because a 0xC0000135 exit code alone does not say which.
+      # A 0xC0000135 exit only says "some DLL in the chain is missing", not
+      # which binary was missing which DLL, so print the import lists and try
+      # the three PATH combinations that could supply the missing one.
       - name: Probe makensis startup (informational)
         shell: pwsh
         run: |
           $mk = 'build/urelease/makensis/makensis.exe'
-          echo "--- dependents of $mk:"
-          dumpbin /dependents $mk 2>&1 | Select-String -Pattern '\.dll' | ForEach-Object { $_.Line.Trim() }
-          echo "--- dependents of the zlib runtime that makensis links against:"
+          echo "--- makensis import list:"
+          dumpbin /dependents $mk 2>&1 | ForEach-Object { $_.Trim() } |
+            Where-Object { $_ -match '^[A-Za-z0-9_.+-]+\.dll$' }
+          echo "--- zlib runtime and its imports, with System32 resolution:"
           foreach ($d in (Get-ChildItem "$HOME/zlib-arm64" -Filter '*.dll')) {
-            echo "  $($d.FullName)"
-            foreach ($dep in (dumpbin /dependents $d.FullName 2>&1 | Select-String -Pattern '\.dll' | ForEach-Object { $_.Line.Trim() })) {
-              echo "    $dep"
+            echo "  file: $($d.FullName)"
+            $deps = dumpbin /dependents $d.FullName 2>&1 | ForEach-Object { $_.Trim() } |
+              Where-Object { $_ -match '^[A-Za-z0-9_.+-]+\.dll$' }
+            foreach ($dep in $deps) {
+              echo "    $dep in System32: $(Test-Path (Join-Path "$env:SystemRoot\System32" $dep))"
             }
           }
-          echo "--- bare run:"
+          echo "--- VC redist assemblies for arm64 on this image:"
+          foreach ($r in (Get-ChildItem $env:VCToolsRedistDir -Recurse -Filter '*.dll' -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match 'arm64' })) {
+            echo "    $($r.Directory.Name)\$($r.Name)"
+          }
+          echo "--- bare run (expect a failure if the runtime is not next to it):"
           & $mk /VERSION
           echo "exit=$LASTEXITCODE"
-          echo "--- with the zlib folder on PATH:"
-          $env:PATH = "$HOME\zlib-arm64;$env:PATH"
+          echo "--- run with the zlib folder appended to PATH:"
+          $env:PATH = "$env:PATH;$HOME\zlib-arm64"
+          & $mk /VERSION
+          echo "exit=$LASTEXITCODE"
+          echo "--- run with the VC redist folders appended to PATH as well:"
+          foreach ($r in (Get-ChildItem $env:VCToolsRedistDir -Recurse -Filter '*.dll' -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match 'arm64' } | Select-Object -ExpandProperty Directory -Unique)) {
+            $env:PATH = "$env:PATH;$($r.FullName)"
+          }
           & $mk /VERSION
           echo "exit=$LASTEXITCODE"
         continue-on-error: true
@@ -385,6 +400,14 @@ jobs:
       - name: Smoke test an arm64 installer (informational)
         shell: pwsh
         run: |
+          # makensis.exe links against the vcpkg zlib runtime, which in turn
+          # needs the VC runtime; put both directories on PATH (appended, so
+          # nothing is shadowed) before anything runs a vcpkg-linked binary.
+          $env:PATH = "$env:PATH;$HOME\zlib-arm64"
+          foreach ($r in (Get-ChildItem $env:VCToolsRedistDir -Recurse -Filter '*.dll' -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match 'arm64' } | Select-Object -ExpandProperty Directory -Unique)) {
+            $env:PATH = "$env:PATH;$($r.FullName)"
+          }
           scons "-j$Env:NUMBER_OF_PROCESSORS" MSTOOLKIT=yes MSVC_USE_SCRIPT=None MSVS_VERSION=14.5 `
             TARGET_ARCH=arm64 ZLIB_W32=$HOME/zlib-arm64 SKIPUTILS="NSIS Menu" DOCTYPES=web dist-zip
           $dist = Get-ChildItem -Directory -Filter 'nsis-*' | Select-Object -First 1
@@ -418,14 +441,11 @@ jobs:
             'SectionEnd'
           )
           & $mk /V2 smoke.nsi
-          $rc = $LASTEXITCODE
+          Write-Output "makensis exit=$LASTEXITCODE"
           if (-not (Test-Path smoke-setup.exe)) {
-            Write-Warning "first makensis run produced no installer (exit $rc); retrying with the zlib folder on PATH"
-            $env:PATH = "$HOME\zlib-arm64;$env:PATH"
-            & $mk /V2 smoke.nsi
-            Write-Output "retry exit=$LASTEXITCODE (see the startup probe step for the import lists)"
+            Write-Error 'makensis produced no installer (see the startup probe step for the import lists)'
+            exit 1
           }
-          if (-not (Test-Path smoke-setup.exe)) { Write-Error 'makensis produced no installer'; exit 1 }
           Start-Process -FilePath .\smoke-setup.exe -ArgumentList '/S' -NoNewWindow -Wait
           $installed = "$env:LOCALAPPDATA\arm64-smoke\payload.txt"
           if (Test-Path $installed) {
