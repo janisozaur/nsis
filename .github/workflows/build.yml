@@ -433,8 +433,14 @@ jobs:
           # next to it, and z.dll only needs VCRUNTIME140.dll which is present
           # in System32 on this image (probe step).  If this fails again the
           # staged layout itself is wrong, and that is what we want to see.
+          # SKIPCLEAN_DIST keeps the staged nsis-* tree around: dist-zip deletes
+          # ZIPDISTDIR in a post action otherwise, and this step then has nothing
+          # to run and reports "smoke test skipped" (runs 41414621044 and
+          # 41416163567).  There is a single TARGET_ARCH pass here, so keeping the
+          # directory has no effect beyond that.
           scons "-j$Env:NUMBER_OF_PROCESSORS" MSTOOLKIT=yes MSVC_USE_SCRIPT=None MSVS_VERSION=14.5 `
-            TARGET_ARCH=arm64 ZLIB_W32=$HOME/zlib-arm64 SKIPUTILS="NSIS Menu" DOCTYPES=web dist-zip
+            TARGET_ARCH=arm64 ZLIB_W32=$HOME/zlib-arm64 SKIPUTILS="NSIS Menu" DOCTYPES=web `
+            SKIPCLEAN_DIST=yes dist-zip
           $dist = Get-ChildItem -Directory -Filter 'nsis-*' | Select-Object -First 1
           if (-not $dist) {
             Write-Warning 'no staged dist dir (nsis-*), smoke test skipped'
@@ -455,6 +461,10 @@ jobs:
           Get-ChildItem (Join-Path $dist.FullName 'Bin') -Filter '*.dll' |
             ForEach-Object { echo "  Bin\$($_.Name)" }
           Set-Content -Path payload.txt -Encoding ascii -Value 'arm64 smoke payload'
+          # SetOutPath is not optional here: File copies to the current output
+          # path, which is not $INSTDIR unless the script says so, and without it
+          # nothing ever appears where the check at the end of this step looks
+          # (measured against the amd64 build of this same script).
           Set-Content -Path smoke.nsi -Encoding ascii -Value @(
             'Unicode true',
             'Name "arm64 smoke"',
@@ -462,6 +472,7 @@ jobs:
             'RequestExecutionLevel user',
             'InstallDir "$LOCALAPPDATA\arm64-smoke"',
             'Section',
+            '  SetOutPath "$INSTDIR"',
             '  File "payload.txt"',
             'SectionEnd'
           )
