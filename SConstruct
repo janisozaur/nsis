@@ -633,21 +633,39 @@ Export('plugin_env plugin_uenv')
 ######################################################################
 
 if defenv['PLATFORM'] == 'win32':
-	def build_nsis_menu_for_zip(target, source, env):
-		cmdline = FindMakeNSIS(env, str(env['ZIPDISTDIR']))
-		if Execute('''"{}" "{}" /X"OutFile '{}'" '''.format(cmdline, source[0].abspath, target[0].abspath)):
-			Exit(1)
+	# Examples/NSISMenu.nsi calls System::Call, and the System plug-in is not
+	# always built: Contrib/System/SConscript skips itself when the target
+	# architecture has no Source/Call-<arch>.S to compile CallProc from (arm64
+	# today), and also when SKIPPLUGINS=System.  Without that plug-in makensis
+	# stops with "Plugin not found, cannot call System::Call" / "Error in
+	# script ... on line 81", which fails dist-zip for a tree whose makensis,
+	# stubs, plug-ins and tools are all fine.  Ask the same question about the
+	# same file that the plug-in asks, before declaring this target at all.
+	# The plug-in's other question (does this toolset have an assembler for
+	# Call.S - ml.exe is not part of MSVC 6.0 Standard) is not asked here, so a
+	# dist-zip on such a toolset fails the way it always did.
+	callasm = 'Source/Call.S' if defenv['TARGET_ARCH'] == 'x86' \
+		else 'Source/Call-%s.S' % defenv['TARGET_ARCH']
+	if 'System' in defenv['SKIPPLUGINS'] or not os.path.exists(
+			os.path.join('Contrib', 'System', callasm)):
+		print('SKIP: NSIS.exe (the NSIS menu) - the System plug-in is not built for %s'
+			% defenv['TARGET_ARCH'])
+	else:
+		def build_nsis_menu_for_zip(target, source, env):
+			cmdline = FindMakeNSIS(env, str(env['ZIPDISTDIR']))
+			if Execute('''"{}" "{}" /X"OutFile '{}'" '''.format(cmdline, source[0].abspath, target[0].abspath)):
+				Exit(1)
 
-	nsis_menu_target = defenv.Command(
-		os.path.join('$ZIPDISTDIR', 'NSIS.exe'),
-		os.path.join('$ZIPDISTDIR', 'Examples', 'NSISMenu.nsi'),
-		build_nsis_menu_for_zip
-	)
-	defenv.Depends(nsis_menu_target, r'$ZIPDISTDIR\makensis.exe')
-	defenv.Depends(nsis_menu_target, r'$ZIPDISTDIR\Stubs')
-	defenv.Depends(nsis_menu_target, r'$ZIPDISTDIR\Plugins')
-	defenv.MakeReproducible(nsis_menu_target)
-	defenv.Sign(nsis_menu_target)
+		nsis_menu_target = defenv.Command(
+			os.path.join('$ZIPDISTDIR', 'NSIS.exe'),
+			os.path.join('$ZIPDISTDIR', 'Examples', 'NSISMenu.nsi'),
+			build_nsis_menu_for_zip
+		)
+		defenv.Depends(nsis_menu_target, r'$ZIPDISTDIR\makensis.exe')
+		defenv.Depends(nsis_menu_target, r'$ZIPDISTDIR\Stubs')
+		defenv.Depends(nsis_menu_target, r'$ZIPDISTDIR\Plugins')
+		defenv.MakeReproducible(nsis_menu_target)
+		defenv.Sign(nsis_menu_target)
 
 dist_zip = 'nsis-${VERSION}${DISTSUFFIX}.zip'
 zip_target = defenv.Zip(dist_zip, '$ZIPDISTDIR')
