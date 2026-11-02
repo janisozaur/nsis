@@ -569,188 +569,79 @@ jobs:
           }
         continue-on-error: true
 
-      # Corrected reading of run 41422430490: the code is 0xC000007B
-      # (STATUS_INVALID_IMAGE_FORMAT), so the ARM64 loader refuses the image
-      # before the entry point - it is not a crash inside the stub, and /GS-
-      # (SCons/Config/ms:32) had already ruled out a stack cookie.  What that
-      # run also established: the tiny CRT-free image with one DIR64
-      # relocation loads at a relocated address and exits 0x5A, and
-      # Bin\makensis.exe (arm64, 26 relocation blocks, a real import table)
-      # runs, so the toolchain and the relocation pass are fine.  The stub and
-      # the installer are what the loader objects to, and the same files load
-      # and install under aarch64 wine, whose loader is a reimplementation and
-      # far more forgiving.  WER local dumps produced nothing (runs keep
-      # dying in the loader, and the dump path was never used), so drop that
-      # and bisect the image instead: copy the stub, clear one PE structure at
-      # a time, and see which copy the loader accepts.  A copy that starts is
-      # a positive result even if it then complains about its own data.
-      # The GUI-subsystem tiny images separate "header shape the linker emits
-      # for a stub" (subsystem windows + LNK4010 for /subsystem:windows,5.01)
-      # from "content of the NSIS stub image": the stub is linked with a
-      # subsystem version the ARM64 linker rejects (LNK4010) and ends up with
-      # OS/subsystem version 6.4 while makensis and the tiny probe say 6.2.
-      - name: Bisect the arm64 image refusal (informational)
+      # The loader refuses a bad image before its entry point runs, and each way
+      # of starting one reports that differently: Start-Process only says "%1 is
+      # not a valid Win32 application", System.Diagnostics.Process gives
+      # 0xC000007B (STATUS_INVALID_IMAGE_FORMAT) and LoadLibrary gives Win32
+      # error 193.  Run 41424942127 used byte-patched copies of the stub to work
+      # out which field of the image was the problem (the subsystem version,
+      # fixed in a1e209cf); what is worth keeping from that is the acceptance
+      # test itself, so every arm64 image this build produces is now simply
+      # asked whether this machine will take it.  A stub copied out of Stubs\
+      # has no NSIS data behind it, so exiting or crashing is expected and means
+      # the loader did its job; a plugin has to actually map into a process.
+      - name: Check that the arm64 images load
         shell: pwsh
         run: |
-          Set-Content -Path hdrlite.py -Encoding ascii -Value @(
-            'import struct, sys',
-            'd = open(sys.argv[1], "rb").read()',
-            'nt = struct.unpack_from("<I", d, 0x3C)[0]',
-            'opt = nt + 24',
-            'mach, nsec = struct.unpack_from("<HH", d, nt + 4)',
-            'szopt = struct.unpack_from("<H", d, nt + 20)[0]',
-            'osv = "%d.%d" % struct.unpack_from("<HH", d, opt + 40)',
-            'subv = "%d.%d" % struct.unpack_from("<HH", d, opt + 48)',
-            'sub, dllch = struct.unpack_from("<HH", d, opt + 68)',
-            'dirs = [struct.unpack_from("<II", d, opt + 112 + 8 * i) for i in range(16)]',
-            'secs = []',
-            'for k in range(nsec):',
-            '    o = opt + szopt + 40 * k',
-            '    n = d[o:o+8].rstrip(b"\0").decode("latin1")',
-            '    vsz, va, rawsz, praw = struct.unpack_from("<IIII", d, o + 8)',
-            '    fl = struct.unpack_from("<I", d, o + 36)[0]',
-            '    secs.append("%s:va=0x%X vsz=0x%X praw=0x%X flags=0x%08X" % (n, va, vsz, praw, fl))',
-            'print("%s machine=0x%X subsys=%d osver=%s subsysver=%s dllch=0x%X img=0x%X dirs=%s" % (',
-            '    sys.argv[1], mach, sub, osv, subv, dllch,',
-            '    struct.unpack_from("<I", d, opt + 56)[0],',
-            '    " ".join("%d:0x%X/0x%X" % (i, r, s) for i, (r, s) in enumerate(dirs) if r or s)))',
-            'print("   " + " ".join(secs))'
-          )
-          Set-Content -Path patch_stub.py -Encoding ascii -Value @(
-            'import struct, sys',
-            'src, out, name = sys.argv[1], sys.argv[2], sys.argv[3]',
-            'd = bytearray(open(src, "rb").read())',
-            'nt = struct.unpack_from("<I", d, 0x3C)[0]',
-            'opt = nt + 24',
-            'def dirset(i, rva, size):',
-            '    struct.pack_into("<II", d, opt + 112 + 8 * i, rva, size)',
-            'def dropsec(nm):',
-            '    sect = opt + struct.unpack_from("<H", d, nt + 20)[0]',
-            '    n = struct.unpack_from("<H", d, nt + 6)[0]',
-            '    for k in range(n):',
-            '        o = sect + 40 * k',
-            '        if d[o:o+8].rstrip(b"\0") == nm.encode():',
-            '            d[o:o+40*(n-k)] = bytes(d[o+40:sect+40*n]) + b"\0" * 40',
-            '            struct.pack_into("<H", d, nt + 6, n - 1)',
-            '            return',
-            'if "nopdata" in name:',
-            '    dirset(3, 0, 0)',
-            'if "norsrc" in name:',
-            '    dirset(2, 0, 0)',
-            'if "noreloc" in name:',
-            '    dirset(5, 0, 0)',
-            '    dc = struct.unpack_from("<H", d, opt + 70)[0]',
-            '    struct.pack_into("<H", d, opt + 70, dc & ~(0x20 | 0x40))',
-            'if "ver62" in name:',
-            '    struct.pack_into("<HH", d, opt + 40, 6, 2)',
-            '    struct.pack_into("<HH", d, opt + 48, 6, 2)',
-            'if "console" in name:',
-            '    struct.pack_into("<H", d, opt + 68, 3)',
-            'if "dropndata" in name:',
-            '    dropsec(".ndata")',
-            'open(out, "wb").write(bytes(d))',
-            'print("wrote %s (%d bytes) variant %s" % (out, len(d), name))'
-          )
-          Set-Content -Path tiny.c -Encoding ascii -Value @(
-            '#include <windows.h>',
-            'void __stdcall tiny_entry(void);',
-            'static void * volatile tiny_p = (void *) tiny_entry;',
-            'void __stdcall tiny_entry(void) { (void) tiny_p; ExitProcess(0x5A); }'
-          )
-          # /FIXED is not an option here (LNK1246 refuses it for ARM64), so the
-          # non-relocatable shape every x86 and amd64 stub has cannot be
-          # reproduced; the GUI pair below is what separates the shapes.
-          cl /nologo /O2 /DWIN32 /Fe:tiny-arm64-probe.exe tiny.c `
-            /link /SUBSYSTEM:CONSOLE /ENTRY:tiny_entry /NODEFAULTLIB kernel32.lib `
-            /DYNAMICBASE /HIGHENTROPYVA
-          Write-Output "cl console exit=$LASTEXITCODE"
-          cl /nologo /O2 /DWIN32 /Fe:tiny-gui-arm64-probe.exe tiny.c `
-            /link /SUBSYSTEM:WINDOWS /ENTRY:tiny_entry /NODEFAULTLIB kernel32.lib `
-            /DYNAMICBASE /HIGHENTROPYVA
-          Write-Output "cl gui exit=$LASTEXITCODE"
-          # The stub's own subsystem flag, so the linker makes the same choice
-          # it makes for the stubs (LNK4010 then picks the default version).
-          cl /nologo /O2 /DWIN32 /Fe:tiny-gui5-arm64-probe.exe tiny.c `
-            /link /SUBSYSTEM:WINDOWS,5.01 /ENTRY:tiny_entry /NODEFAULTLIB kernel32.lib `
-            /DYNAMICBASE /HIGHENTROPYVA
-          Write-Output "cl gui5 exit=$LASTEXITCODE"
-          $stub = Get-ChildItem -Directory -Filter 'nsis-*' | ForEach-Object {
-            Get-ChildItem (Join-Path $_.FullName 'Stubs') -File -Filter 'zlib-arm64-unicode'
-          } | Select-Object -First 1
-          if (-not $stub) { Write-Warning 'no arm64 stub to copy, bisection skipped' }
-          else {
-            Copy-Item $stub.FullName p-base.exe
-            foreach ($v in 'nopdata', 'norsrc', 'noreloc', 'ver62', 'console',
-                         'dropndata', 'nopdata-ver62') {
-              python patch_stub.py p-base.exe "p-$v.exe" $v
-            }
-          }
-          foreach ($f in 'tiny-arm64-probe.exe', 'tiny-gui-arm64-probe.exe', `
-                         'tiny-gui5-arm64-probe.exe', 'p-base.exe') {
-            if (Test-Path $f) { python hdrlite.py $f }
-          }
+          $dist = Get-ChildItem -Directory -Filter 'nsis-*' | Select-Object -First 1
+          if (-not $dist) { Write-Error 'no staged dist dir to inspect'; exit 1 }
+          $bad = @()
           function Probe([string]$exe, [string]$a) {
-            if (-not (Test-Path $exe)) { Write-Output "  $exe : missing"; return }
             $p = New-Object System.Diagnostics.Process
             $p.StartInfo.FileName = (Resolve-Path $exe).Path
             $p.StartInfo.Arguments = $a
             $p.StartInfo.UseShellExecute = $false
             try {
               [void]$p.Start()
-              try {
-                Write-Output ("  $exe : base=0x{0:X}" -f $p.Modules[0].BaseAddress)
-              } catch { Write-Output "  $exe : base unavailable: $($_.Exception.Message)" }
               if (-not $p.WaitForExit(20000)) {
-                $p.Kill(); Write-Output "  $exe : LOADED, still running (killed)"
+                $p.Kill()
+                Write-Output "  $exe : loader accepted it (still running, killed)"
+                return
+              }
+              $c = $p.ExitCode -band 0xFFFFFFFF
+              if ($c -eq 0xC000007B) {
+                $script:bad += "loader refused $exe (0xC000007B)"
+                Write-Output "  $exe : loader refused it, 0xC000007B"
               } else {
-                $c = $p.ExitCode -band 0xFFFFFFFF
-                $note = if ($c -eq 0xC000007B) { ' <loader refused>' } else { ' <loaded>' }
-                Write-Output ("  $exe : exit=0x{0:X8}$note" -f $c)
+                Write-Output ("  $exe : loader accepted it, exit=0x{0:X8}" -f $c)
               }
             } catch {
               $e = $_.Exception
               while ($e.InnerException) { $e = $e.InnerException }
-              Write-Output "  $exe : start failed code=$($e.NativeErrorCode) $($e.Message)"
+              $script:bad += "could not start $exe (Win32 error $($e.NativeErrorCode))"
+              Write-Output "  $exe : could not start, code=$($e.NativeErrorCode)"
             }
           }
-          Probe 'tiny-arm64-probe.exe' ''
-          Probe 'tiny-gui-arm64-probe.exe' ''
-          Probe 'tiny-gui5-arm64-probe.exe' ''
-          Probe 'p-base.exe' '/S'
-          foreach ($v in 'nopdata', 'norsrc', 'noreloc', 'ver62', 'console',
-                         'dropndata', 'nopdata-ver62') {
-            Probe "p-$v.exe" '/S'
+          foreach ($s in Get-ChildItem (Join-Path $dist.FullName 'Stubs') -File -Filter '*-arm64-unicode') {
+            $tmp = "load-probe-$($s.Name).exe"
+            Copy-Item $s.FullName $tmp -Force
+            Probe $tmp '/S'
+            Remove-Item $tmp -Force
           }
           if (Test-Path .\smoke-setup.exe) { Probe '.\smoke-setup.exe' '/S' }
-          # cdb exists on this image (run 41422430490), but -c with a command
-          # string is split by PowerShell into several arguments and cdb then
-          # reads the next one as the image to debug ("Cannot execute ...
-          # Win32 error 0n2").  A command file avoids the quoting entirely.
-          $cdb = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Debuggers' `
-            -Recurse -Filter cdb.exe -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -like '*\arm64\*' } | Select-Object -First 1
-          if (-not $cdb) {
-            Write-Output 'no arm64 cdb.exe on this image'
-          } elseif (Test-Path p-base.exe) {
-            Set-Content -Path cdbcmds.txt -Encoding ascii -Value @(
-              'sxe -c ".exr -1; k 30; lm; q" c000007b',
-              'g',
-              '.exr -1',
-              'k 30',
-              'lm',
-              'q'
-            )
-            Write-Output "cdb: $($cdb.FullName)"
-            $c = Start-Process -FilePath $cdb.FullName -NoNewWindow -PassThru `
-              -RedirectStandardOutput cdb.log -RedirectStandardError cdb.err.log `
-              -ArgumentList '-G', '-cf', 'cdbcmds.txt', '-o', 'p-base.exe', '/S'
-            if (-not $c.WaitForExit(120000)) { $c.Kill(); Write-Output 'cdb timed out' }
-            Write-Output '--- cdb.log:'
-            Get-Content cdb.log -ErrorAction SilentlyContinue | Select-Object -Last 50
-            Write-Output '--- cdb.err.log:'
-            Get-Content cdb.err.log -ErrorAction SilentlyContinue | Select-Object -Last 10
+          # LOAD_WITH_ALTERED_SEARCH_PATH (0x1) so that a plugin finds anything
+          # sitting next to it, which is how the stub loads it at run time.
+          Add-Type -Name Ldr -MemberDefinition '[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)] public static extern IntPtr LoadLibraryExW(string file, IntPtr hFile, uint flags); [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)] public static extern bool FreeLibrary(IntPtr module);'
+          $mods = @(Get-ChildItem (Join-Path $dist.FullName 'Plugins\arm64-unicode') -File -Filter '*.dll' -ErrorAction SilentlyContinue)
+          $mods += @(Get-ChildItem (Join-Path $dist.FullName 'Bin') -File -Filter 'RegTool-arm64.bin' -ErrorAction SilentlyContinue)
+          if (-not $mods.Count) { $bad += 'no arm64 plugins in the dist to load' }
+          foreach ($m in $mods) {
+            $h = [Ldr]::LoadLibraryExW($m.FullName, [IntPtr]::Zero, 0x1)
+            if ($h -eq [IntPtr]::Zero) {
+              $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+              $bad += "LoadLibrary refused $($m.Name) (Win32 error $err)"
+              Write-Output "  $($m.Name) : LoadLibrary refused it, Win32 error $err"
+            } else {
+              Write-Output "  $($m.Name) : mapped at 0x$($h.ToString('X'))"
+              [void][Ldr]::FreeLibrary($h)
+            }
           }
-        continue-on-error: true
+          if ($bad.Count) {
+            Write-Output 'images the arm64 loader would not take:'
+            $bad | ForEach-Object { Write-Output "  $_" }
+            exit 1
+          }
+          Write-Output 'LOAD OK: every arm64 stub, plugin and the smoke installer was accepted'
 
       # Nothing in this job gates anything, and a failing arm64 image is
       # easier to look at somewhere with more tools than a runner: the zip is a
@@ -768,16 +659,6 @@ jobs:
             smoke.nsi
             payload.txt
             peinfo.py
-            hdrlite.py
-            patch_stub.py
-            tiny.c
-            tiny-arm64-probe.exe
-            tiny-gui-arm64-probe.exe
-            tiny-gui5-arm64-probe.exe
-            p-*.exe
-            cdbcmds.txt
-            cdb.log
-            cdb.err.log
           retention-days: 14
           if-no-files-found: warn
 
