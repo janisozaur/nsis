@@ -764,6 +764,8 @@ DWORD CResourceEditor::Save(BYTE* pbBuf, DWORD &dwSize) {
 bool CResourceEditor::SetPESectionVirtualSize(const char* pszSectionName, DWORD newsize)
 {
   PIMAGE_SECTION_HEADER sectionHeadersArray = IMAGE_FIRST_SECTION(m_ntHeaders);
+  PIMAGE_DATA_DIRECTORY pDataDirectory = *GetMemberFromPEOptHdr(m_ntHeaders->OptionalHeader, DataDirectory);
+  DWORD dwNumberOfRvaAndSizes = ConvertEndianness(*GetMemberFromPEOptHdr(m_ntHeaders->OptionalHeader, NumberOfRvaAndSizes));
 
   // Refresh the headers of the sections that come after the resource section, and the data directory
   for (int i = 0; i < ConvertEndianness(m_ntHeaders->FileHeader.NumberOfSections); i++) {
@@ -778,12 +780,28 @@ bool CResourceEditor::SetPESectionVirtualSize(const char* pszSectionName, DWORD 
         DWORD dwLastSecSize = ConvertEndianness(sectionHeadersArray[i].Misc.VirtualSize);
         DWORD dwSecVA = AlignVA(ConvertEndianness(dwLastSecVA + dwLastSecSize));
 
+        // A data directory that points at the start of a section that has to move
+        // has to move with it, the same way CResourceEditor::Save() keeps the
+        // directories of the sections after the resource section in sync.  Until
+        // this loop only the resource directory followed, and that is invisible on
+        // x86 and amd64 because those stubs are linked with /FIXED and have no
+        // relocations at all (see SCons/Config/ms), while /FIXED is refused for the
+        // ARM64 machine (LNK1246) so an arm64 stub always ends with .reloc and a
+        // base relocation directory that points at the start of it.  Left behind,
+        // the loader reads the relocation blocks that are no longer in .reloc and
+        // the installer is refused with STATUS_INVALID_IMAGE_FORMAT
+        // ("not a valid Win32 application", ERROR_BAD_EXE_FORMAT).
+        // This has to happen before VirtualAddress is written, and both sides are
+        // compared in file order like Save() does.
+        for (DWORD j = 0; j < dwNumberOfRvaAndSizes; j++)
+          if (pDataDirectory[j].VirtualAddress == sectionHeadersArray[k].VirtualAddress)
+            pDataDirectory[j].VirtualAddress = dwSecVA;
+
         sectionHeadersArray[k].VirtualAddress = dwSecVA;
 
         if (m_dwResourceSectionIndex == (DWORD) k)
         {
           // fix the resources virtual address if it changed
-          PIMAGE_DATA_DIRECTORY pDataDirectory = *GetMemberFromPEOptHdr(m_ntHeaders->OptionalHeader, DataDirectory);
           pDataDirectory[IMAGE_DIRECTORY_ENTRY_RESOURCE].VirtualAddress = dwSecVA;
           m_dwResourceSectionVA = ConvertEndianness(dwSecVA);
         }
