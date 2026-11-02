@@ -557,47 +557,126 @@ jobs:
           }
         continue-on-error: true
 
-      # 0xC0000409 says "stack buffer overrun / __fastfail", which covers
-      # several unrelated things, and the bare stubs show the same code, so
-      # this splits the two live possibilities.  The tiny probe is an arm64
-      # image from the same toolchain with no CRT and one DIR64 base
-      # relocation: if it runs, arm64 + /NODEFAULTLIB + relocations are fine
-      # on this machine and the fault is in the NSIS stub.  The base address
-      # shows whether the loader actually relocated the image: under wine the
-      # stubs load at their preferred 0x140000000 and work, so a relocated
-      # load here points at something that depends on the preferred base.
-      # WER local dumps carry the exception record and the faulting address,
-      # which is the part a runner log cannot show.
-      - name: Diagnose arm64 startup (informational)
+      # Corrected reading of run 41422430490: the code is 0xC000007B
+      # (STATUS_INVALID_IMAGE_FORMAT), so the ARM64 loader refuses the image
+      # before the entry point - it is not a crash inside the stub, and /GS-
+      # (SCons/Config/ms:32) had already ruled out a stack cookie.  What that
+      # run also established: the tiny CRT-free image with one DIR64
+      # relocation loads at a relocated address and exits 0x5A, and
+      # Bin\makensis.exe (arm64, 26 relocation blocks, a real import table)
+      # runs, so the toolchain and the relocation pass are fine.  The stub and
+      # the installer are what the loader objects to, and the same files load
+      # and install under aarch64 wine, whose loader is a reimplementation and
+      # far more forgiving.  WER local dumps produced nothing (runs keep
+      # dying in the loader, and the dump path was never used), so drop that
+      # and bisect the image instead: copy the stub, clear one PE structure at
+      # a time, and see which copy the loader accepts.  A copy that starts is
+      # a positive result even if it then complains about its own data.
+      # The GUI-subsystem tiny images separate "header shape the linker emits
+      # for a stub" (subsystem windows + LNK4010 for /subsystem:windows,5.01)
+      # from "content of the NSIS stub image": the stub is linked with a
+      # subsystem version the ARM64 linker rejects (LNK4010) and ends up with
+      # OS/subsystem version 6.4 while makensis and the tiny probe say 6.2.
+      - name: Bisect the arm64 image refusal (informational)
         shell: pwsh
         run: |
-          $dumps = Join-Path $PWD 'dumps'
-          New-Item -ItemType Directory -Path $dumps -Force | Out-Null
+          Set-Content -Path hdrlite.py -Encoding ascii -Value @(
+            'import struct, sys',
+            'd = open(sys.argv[1], "rb").read()',
+            'nt = struct.unpack_from("<I", d, 0x3C)[0]',
+            'opt = nt + 24',
+            'mach, nsec = struct.unpack_from("<HH", d, nt + 4)',
+            'szopt = struct.unpack_from("<H", d, nt + 20)[0]',
+            'osv = "%d.%d" % struct.unpack_from("<HH", d, opt + 40)',
+            'subv = "%d.%d" % struct.unpack_from("<HH", d, opt + 48)',
+            'sub, dllch = struct.unpack_from("<HH", d, opt + 68)',
+            'dirs = [struct.unpack_from("<II", d, opt + 112 + 8 * i) for i in range(16)]',
+            'secs = []',
+            'for k in range(nsec):',
+            '    o = opt + szopt + 40 * k',
+            '    n = d[o:o+8].rstrip(b"\0").decode("latin1")',
+            '    vsz, va, rawsz, praw = struct.unpack_from("<IIII", d, o + 8)',
+            '    fl = struct.unpack_from("<I", d, o + 36)[0]',
+            '    secs.append("%s:va=0x%X vsz=0x%X praw=0x%X flags=0x%08X" % (n, va, vsz, praw, fl))',
+            'print("%s machine=0x%X subsys=%d osver=%s subsysver=%s dllch=0x%X img=0x%X dirs=%s" % (',
+            '    sys.argv[1], mach, sub, osv, subv, dllch,',
+            '    struct.unpack_from("<I", d, opt + 56)[0],',
+            '    " ".join("%d:0x%X/0x%X" % (i, r, s) for i, (r, s) in enumerate(dirs) if r or s)))',
+            'print("   " + " ".join(secs))'
+          )
+          Set-Content -Path patch_stub.py -Encoding ascii -Value @(
+            'import struct, sys',
+            'src, out, name = sys.argv[1], sys.argv[2], sys.argv[3]',
+            'd = bytearray(open(src, "rb").read())',
+            'nt = struct.unpack_from("<I", d, 0x3C)[0]',
+            'opt = nt + 24',
+            'def dirset(i, rva, size):',
+            '    struct.pack_into("<II", d, opt + 112 + 8 * i, rva, size)',
+            'def dropsec(nm):',
+            '    sect = opt + struct.unpack_from("<H", d, nt + 20)[0]',
+            '    n = struct.unpack_from("<H", d, nt + 6)[0]',
+            '    for k in range(n):',
+            '        o = sect + 40 * k',
+            '        if d[o:o+8].rstrip(b"\0") == nm.encode():',
+            '            d[o:o+40*(n-k)] = bytes(d[o+40:sect+40*n]) + b"\0" * 40',
+            '            struct.pack_into("<H", d, nt + 6, n - 1)',
+            '            return',
+            'if "nopdata" in name:',
+            '    dirset(3, 0, 0)',
+            'if "norsrc" in name:',
+            '    dirset(2, 0, 0)',
+            'if "noreloc" in name:',
+            '    dirset(5, 0, 0)',
+            '    dc = struct.unpack_from("<H", d, opt + 70)[0]',
+            '    struct.pack_into("<H", d, opt + 70, dc & ~(0x20 | 0x40))',
+            'if "ver62" in name:',
+            '    struct.pack_into("<HH", d, opt + 40, 6, 2)',
+            '    struct.pack_into("<HH", d, opt + 48, 6, 2)',
+            'if "console" in name:',
+            '    struct.pack_into("<H", d, opt + 68, 3)',
+            'if "dropndata" in name:',
+            '    dropsec(".ndata")',
+            'open(out, "wb").write(bytes(d))',
+            'print("wrote %s (%d bytes) variant %s" % (out, len(d), name))'
+          )
           Set-Content -Path tiny.c -Encoding ascii -Value @(
             '#include <windows.h>',
             'void __stdcall tiny_entry(void);',
             'static void * volatile tiny_p = (void *) tiny_entry;',
             'void __stdcall tiny_entry(void) { (void) tiny_p; ExitProcess(0x5A); }'
           )
+          # /FIXED is not an option here (LNK1246 refuses it for ARM64), so the
+          # non-relocatable shape every x86 and amd64 stub has cannot be
+          # reproduced; the GUI pair below is what separates the shapes.
           cl /nologo /O2 /DWIN32 /Fe:tiny-arm64-probe.exe tiny.c `
             /link /SUBSYSTEM:CONSOLE /ENTRY:tiny_entry /NODEFAULTLIB kernel32.lib `
             /DYNAMICBASE /HIGHENTROPYVA
-          Write-Output "cl exit=$LASTEXITCODE"
-          # The same image without any absolute initializer and without
-          # DYNAMIC_BASE: that is the shape every x86 and amd64 NSIS stub has
-          # (/FIXED in SCons/Config/ms, so the loader never relocates it), and
-          # ARM64 refuses /FIXED precisely because it then has no .reloc
-          # (LNK1246).  If this one starts at 0x140000000 and runs while the
-          # relocatable one does not, the problem is the relocation pass, not
-          # the NSIS stub.
-          Set-Content -Path tiny_fixed.c -Encoding ascii -Value @(
-            '#include <windows.h>',
-            'void __stdcall tiny_fixed_entry(void) { ExitProcess(0x5A); }'
-          )
-          cl /nologo /O2 /DWIN32 /Fe:tiny-fixed-arm64-probe.exe tiny_fixed.c `
-            /link /SUBSYSTEM:CONSOLE /ENTRY:tiny_fixed_entry /NODEFAULTLIB kernel32.lib `
-            /FIXED /DYNAMICBASE:NO
-          Write-Output "cl (fixed) exit=$LASTEXITCODE"
+          Write-Output "cl console exit=$LASTEXITCODE"
+          cl /nologo /O2 /DWIN32 /Fe:tiny-gui-arm64-probe.exe tiny.c `
+            /link /SUBSYSTEM:WINDOWS /ENTRY:tiny_entry /NODEFAULTLIB kernel32.lib `
+            /DYNAMICBASE /HIGHENTROPYVA
+          Write-Output "cl gui exit=$LASTEXITCODE"
+          # The stub's own subsystem flag, so the linker makes the same choice
+          # it makes for the stubs (LNK4010 then picks the default version).
+          cl /nologo /O2 /DWIN32 /Fe:tiny-gui5-arm64-probe.exe tiny.c `
+            /link /SUBSYSTEM:WINDOWS,5.01 /ENTRY:tiny_entry /NODEFAULTLIB kernel32.lib `
+            /DYNAMICBASE /HIGHENTROPYVA
+          Write-Output "cl gui5 exit=$LASTEXITCODE"
+          $stub = Get-ChildItem -Directory -Filter 'nsis-*' | ForEach-Object {
+            Get-ChildItem (Join-Path $_.FullName 'Stubs') -File -Filter 'zlib-arm64-unicode'
+          } | Select-Object -First 1
+          if (-not $stub) { Write-Warning 'no arm64 stub to copy, bisection skipped' }
+          else {
+            Copy-Item $stub.FullName p-base.exe
+            foreach ($v in 'nopdata', 'norsrc', 'noreloc', 'ver62', 'console',
+                         'dropndata', 'nopdata-ver62') {
+              python patch_stub.py p-base.exe "p-$v.exe" $v
+            }
+          }
+          foreach ($f in 'tiny-arm64-probe.exe', 'tiny-gui-arm64-probe.exe', `
+                         'tiny-gui5-arm64-probe.exe', 'p-base.exe') {
+            if (Test-Path $f) { python hdrlite.py $f }
+          }
           function Probe([string]$exe, [string]$a) {
             if (-not (Test-Path $exe)) { Write-Output "  $exe : missing"; return }
             $p = New-Object System.Diagnostics.Process
@@ -610,9 +689,11 @@ jobs:
                 Write-Output ("  $exe : base=0x{0:X}" -f $p.Modules[0].BaseAddress)
               } catch { Write-Output "  $exe : base unavailable: $($_.Exception.Message)" }
               if (-not $p.WaitForExit(20000)) {
-                $p.Kill(); Write-Output "  $exe : still running (killed)"
+                $p.Kill(); Write-Output "  $exe : LOADED, still running (killed)"
               } else {
-                Write-Output ("  $exe : exit=0x{0:X8}" -f ($p.ExitCode -band 0xFFFFFFFF))
+                $c = $p.ExitCode -band 0xFFFFFFFF
+                $note = if ($c -eq 0xC000007B) { ' <loader refused>' } else { ' <loaded>' }
+                Write-Output ("  $exe : exit=0x{0:X8}$note" -f $c)
               }
             } catch {
               $e = $_.Exception
@@ -621,42 +702,42 @@ jobs:
             }
           }
           Probe 'tiny-arm64-probe.exe' ''
-          Probe 'tiny-fixed-arm64-probe.exe' ''
-          $key = 'HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\smoke-setup.exe'
-          reg add "$key" /v DumpFolder /t REG_EXPAND_SZ /d $dumps /f | Out-Null
-          reg add "$key" /v DumpType /t REG_DWORD /d 2 /f | Out-Null
-          reg add "$key" /v DumpCount /t REG_DWORD /d 3 /f | Out-Null
-          if (Test-Path .\smoke-setup.exe) {
-            Probe '.\smoke-setup.exe' '/S'
-            # WER writes the dump asynchronously, and the second run of the same
-            # image loads somewhere else under ASLR, which is the comparison that
-            # matters here.
-            Start-Sleep -Seconds 3
-            Probe '.\smoke-setup.exe' '/S'
-            Start-Sleep -Seconds 3
-          } else {
-            Write-Warning 'no smoke-setup.exe from the smoke step, nothing to dump'
+          Probe 'tiny-gui-arm64-probe.exe' ''
+          Probe 'tiny-gui5-arm64-probe.exe' ''
+          Probe 'p-base.exe' '/S'
+          foreach ($v in 'nopdata', 'norsrc', 'noreloc', 'ver62', 'console',
+                         'dropndata', 'nopdata-ver62') {
+            Probe "p-$v.exe" '/S'
           }
-          Get-ChildItem $dumps -Filter '*.dmp' -ErrorAction SilentlyContinue |
-            ForEach-Object { Write-Output "  dump: $($_.Name) $($_.Length) bytes" }
-          # A crash dump says the exception code; a debugger says which
-          # instruction and which module.  Whether the arm64 image has the SDK
-          # debuggers is not documented for this image, so ask for them and use
-          # them only if they are there.
+          if (Test-Path .\smoke-setup.exe) { Probe '.\smoke-setup.exe' '/S' }
+          # cdb exists on this image (run 41422430490), but -c with a command
+          # string is split by PowerShell into several arguments and cdb then
+          # reads the next one as the image to debug ("Cannot execute ...
+          # Win32 error 0n2").  A command file avoids the quoting entirely.
           $cdb = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Debuggers' `
             -Recurse -Filter cdb.exe -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -like '*\arm64\*' } | Select-Object -First 1
           if (-not $cdb) {
             Write-Output 'no arm64 cdb.exe on this image'
-          } elseif (Test-Path .\smoke-setup.exe) {
+          } elseif (Test-Path p-base.exe) {
+            Set-Content -Path cdbcmds.txt -Encoding ascii -Value @(
+              'sxe -c ".exr -1; k 30; lm; q" c000007b',
+              'g',
+              '.exr -1',
+              'k 30',
+              'lm',
+              'q'
+            )
             Write-Output "cdb: $($cdb.FullName)"
             $c = Start-Process -FilePath $cdb.FullName -NoNewWindow -PassThru `
               -RedirectStandardOutput cdb.log -RedirectStandardError cdb.err.log `
-              -ArgumentList '-g', '-G', '-c', 'g; .exr -1; k 24; lm; q', '.\smoke-setup.exe', '/S'
+              -ArgumentList '-G', '-cf', 'cdbcmds.txt', '-o', 'p-base.exe', '/S'
             if (-not $c.WaitForExit(120000)) { $c.Kill(); Write-Output 'cdb timed out' }
-            Get-Content cdb.log -ErrorAction SilentlyContinue | Select-Object -Last 45
+            Write-Output '--- cdb.log:'
+            Get-Content cdb.log -ErrorAction SilentlyContinue | Select-Object -Last 50
+            Write-Output '--- cdb.err.log:'
+            Get-Content cdb.err.log -ErrorAction SilentlyContinue | Select-Object -Last 10
           }
-          reg delete "$key" /f | Out-Null
         continue-on-error: true
 
       # Nothing in this job gates anything, and a failing arm64 image is
@@ -675,12 +756,16 @@ jobs:
             smoke.nsi
             payload.txt
             peinfo.py
+            hdrlite.py
+            patch_stub.py
             tiny.c
-            tiny_fixed.c
             tiny-arm64-probe.exe
-            tiny-fixed-arm64-probe.exe
+            tiny-gui-arm64-probe.exe
+            tiny-gui5-arm64-probe.exe
+            p-*.exe
+            cdbcmds.txt
             cdb.log
-            dumps/*.dmp
+            cdb.err.log
           retention-days: 14
           if-no-files-found: warn
 
