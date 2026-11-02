@@ -110,7 +110,12 @@ jobs:
         os: [windows-2022, windows-2025]
         log: [yes, no]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    # 20 rather than 10: on runs 41414621044 and 41420542390 exactly one of the
+    # four build-windows jobs was killed at the 10 minute mark inside "Build and
+    # test x86 (MSVC)" while its siblings finished that same step in 3-4 minutes
+    # with nothing in the log.  A job timeout makes the whole run read
+    # "cancelled", which hides whether the build itself is green.
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -575,8 +580,24 @@ jobs:
             'void __stdcall tiny_entry(void) { (void) tiny_p; ExitProcess(0x5A); }'
           )
           cl /nologo /O2 /DWIN32 /Fe:tiny-arm64-probe.exe tiny.c `
-            /link /SUBSYSTEM:CONSOLE /ENTRY:tiny_entry /NODEFAULTLIB /DYNAMICBASE /HIGHENTROPYVA
+            /link /SUBSYSTEM:CONSOLE /ENTRY:tiny_entry /NODEFAULTLIB kernel32.lib `
+            /DYNAMICBASE /HIGHENTROPYVA
           Write-Output "cl exit=$LASTEXITCODE"
+          # The same image without any absolute initializer and without
+          # DYNAMIC_BASE: that is the shape every x86 and amd64 NSIS stub has
+          # (/FIXED in SCons/Config/ms, so the loader never relocates it), and
+          # ARM64 refuses /FIXED precisely because it then has no .reloc
+          # (LNK1246).  If this one starts at 0x140000000 and runs while the
+          # relocatable one does not, the problem is the relocation pass, not
+          # the NSIS stub.
+          Set-Content -Path tiny_fixed.c -Encoding ascii -Value @(
+            '#include <windows.h>',
+            'void __stdcall tiny_fixed_entry(void) { ExitProcess(0x5A); }'
+          )
+          cl /nologo /O2 /DWIN32 /Fe:tiny-fixed-arm64-probe.exe tiny_fixed.c `
+            /link /SUBSYSTEM:CONSOLE /ENTRY:tiny_fixed_entry /NODEFAULTLIB kernel32.lib `
+            /FIXED /DYNAMICBASE:NO
+          Write-Output "cl (fixed) exit=$LASTEXITCODE"
           function Probe([string]$exe, [string]$a) {
             if (-not (Test-Path $exe)) { Write-Output "  $exe : missing"; return }
             $p = New-Object System.Diagnostics.Process
@@ -591,7 +612,7 @@ jobs:
               if (-not $p.WaitForExit(20000)) {
                 $p.Kill(); Write-Output "  $exe : still running (killed)"
               } else {
-                Write-Output ("  $exe : exit=0x{0:X8}" -f [uint32]$p.ExitCode)
+                Write-Output ("  $exe : exit=0x{0:X8}" -f ($p.ExitCode -band 0xFFFFFFFF))
               }
             } catch {
               $e = $_.Exception
@@ -600,18 +621,41 @@ jobs:
             }
           }
           Probe 'tiny-arm64-probe.exe' ''
+          Probe 'tiny-fixed-arm64-probe.exe' ''
           $key = 'HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\smoke-setup.exe'
           reg add "$key" /v DumpFolder /t REG_EXPAND_SZ /d $dumps /f | Out-Null
           reg add "$key" /v DumpType /t REG_DWORD /d 2 /f | Out-Null
           reg add "$key" /v DumpCount /t REG_DWORD /d 3 /f | Out-Null
           if (Test-Path .\smoke-setup.exe) {
             Probe '.\smoke-setup.exe' '/S'
+            # WER writes the dump asynchronously, and the second run of the same
+            # image loads somewhere else under ASLR, which is the comparison that
+            # matters here.
+            Start-Sleep -Seconds 3
             Probe '.\smoke-setup.exe' '/S'
+            Start-Sleep -Seconds 3
           } else {
             Write-Warning 'no smoke-setup.exe from the smoke step, nothing to dump'
           }
           Get-ChildItem $dumps -Filter '*.dmp' -ErrorAction SilentlyContinue |
             ForEach-Object { Write-Output "  dump: $($_.Name) $($_.Length) bytes" }
+          # A crash dump says the exception code; a debugger says which
+          # instruction and which module.  Whether the arm64 image has the SDK
+          # debuggers is not documented for this image, so ask for them and use
+          # them only if they are there.
+          $cdb = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Debuggers' `
+            -Recurse -Filter cdb.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -like '*\arm64\*' } | Select-Object -First 1
+          if (-not $cdb) {
+            Write-Output 'no arm64 cdb.exe on this image'
+          } elseif (Test-Path .\smoke-setup.exe) {
+            Write-Output "cdb: $($cdb.FullName)"
+            $c = Start-Process -FilePath $cdb.FullName -NoNewWindow -PassThru `
+              -RedirectStandardOutput cdb.log -RedirectStandardError cdb.err.log `
+              -ArgumentList '-g', '-G', '-c', 'g; .exr -1; k 24; lm; q', '.\smoke-setup.exe', '/S'
+            if (-not $c.WaitForExit(120000)) { $c.Kill(); Write-Output 'cdb timed out' }
+            Get-Content cdb.log -ErrorAction SilentlyContinue | Select-Object -Last 45
+          }
           reg delete "$key" /f | Out-Null
         continue-on-error: true
 
@@ -631,7 +675,11 @@ jobs:
             smoke.nsi
             payload.txt
             peinfo.py
+            tiny.c
+            tiny_fixed.c
             tiny-arm64-probe.exe
+            tiny-fixed-arm64-probe.exe
+            cdb.log
             dumps/*.dmp
           retention-days: 14
           if-no-files-found: warn
