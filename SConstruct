@@ -574,6 +574,12 @@ if 'ZLIB_W32' in defenv:
 		[defenv['ZLIB_W32'], defenv['ZLIB_W32_LIB']])
 	defenv['ZLIB_W32_NEW_DLL'] = defenv.FindFile('zlib.dll',
 		[defenv['ZLIB_W32'], defenv['ZLIB_W32_LIB']])
+	# vcpkg's zlib port names the DLL z.dll (and its import library records
+	# that name, so the file cannot be renamed to one of the two above).
+	# Without this lookup nothing is distributed and the staged
+	# makensis.exe dies with 0xC0000135 (STATUS_DLL_NOT_FOUND).
+	defenv['ZLIB_W32_VCPKG_DLL'] = defenv.FindFile('z.dll',
+		[defenv['ZLIB_W32'], defenv['ZLIB_W32_LIB']])
 
 if 'ZSTD_W32' in defenv:
 	defenv['ZSTD_W32_INC'] = os.path.dirname(str(

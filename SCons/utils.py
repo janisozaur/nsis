@@ -54,6 +54,8 @@ def AddZLib(env, platform, alias='install-utils'):
 				env.DistributeW32Bin(env['ZLIB_W32_DLL'], alias=alias)
 			if 'ZLIB_W32_NEW_DLL' in env and env['ZLIB_W32_NEW_DLL']:
 				env.DistributeW32Bin(env['ZLIB_W32_NEW_DLL'], alias=alias)
+			if 'ZLIB_W32_VCPKG_DLL' in env and env['ZLIB_W32_VCPKG_DLL']:
+				env.DistributeW32Bin(env['ZLIB_W32_VCPKG_DLL'], alias=alias)
 		else:
 			print('Please specify folder of zlib for Win32 via ZLIB_W32')
 			Exit(1)
