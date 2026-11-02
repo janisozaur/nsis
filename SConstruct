@@ -330,7 +330,17 @@ def GetArcSuffix(env, unicode = None):
 
 def GetTargetMinOSVersion(env):
 	if GetArcCPU(defenv) == 'arm64':
-		return (6, 4)
+		# 6.02, the oldest subsystem version the ARM64 machine accepts, and
+		# not 6.4: a byte-patched copy of an arm64 stub that asked for 6.4
+		# was refused by the loader of a windows-11-arm runner with
+		# 0xC000007B (STATUS_INVALID_IMAGE_FORMAT) before its entry point,
+		# and the same bytes loaded once these two fields said 6.2
+		# (run 41424942127; clearing the exception directory, the resource
+		# directory or the base relocation directory changed nothing).  The
+		# control was Bin\makensis.exe: it is not touched by this function,
+		# keeps the linker's own 6.2, and starts.  6.4 was the pre-release
+		# version number of Windows 10, so treat it as unavailable.
+		return (6, 2)
 	if not GetArcCPU(defenv) == 'x86':
 		return (5, 1)
 	return (4, 0)
