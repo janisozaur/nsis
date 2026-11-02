@@ -713,7 +713,22 @@ DWORD CResourceEditor::Save(BYTE* pbBuf, DWORD &dwSize) {
   PIMAGE_DATA_DIRECTORY pDataDirectory = *GetMemberFromPEOptHdr(ntHeaders->OptionalHeader, DataDirectory);
   for (i = m_dwResourceSectionIndex + 1; i < wNumberOfSections; i++) {
     if (sectionHeadersArray[i].PointerToRawData) {
-      AdjustVA(sectionHeadersArray[i].PointerToRawData, dwRsrcSizeAligned - dwOldRsrcSize);
+      // AdjustVA() returns the adjusted value, it does not write through its
+      // argument, so the raw offset has to be assigned the same way the virtual
+      // address below is.  Only the copy of the section data moved (everything
+      // after the resource section is copied by value), which left the header
+      // pointing at the old offset: whenever the resource section changed size,
+      // any section behind it claimed raw data that is no longer there.
+      // This stays invisible on x86 and amd64 because every stub we build ends
+      // with .rsrc (mingw, VC6 and MSVC all put the resource section last, and
+      // the MSVC stubs are linked /FIXED so there is no .reloc behind it - see
+      // SCons/Config/ms), while link.exe puts .reloc last for the ARM64 machine
+      // where /FIXED is refused (LNK1246).  An arm64 installer therefore ends up
+      // with a .reloc header pointing past the end of the file and the loader
+      // refuses it with STATUS_INVALID_IMAGE_FORMAT ("not a valid Win32
+      // application", ERROR_BAD_EXE_FORMAT, Win32 error 193).
+      sectionHeadersArray[i].PointerToRawData =
+        AdjustVA(sectionHeadersArray[i].PointerToRawData, dwRsrcSizeAligned - dwOldRsrcSize);
     }
 
     // We must find the right data directory entry before we change the virtual address
