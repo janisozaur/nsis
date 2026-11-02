@@ -471,44 +471,67 @@ jobs:
             Write-Error 'makensis produced no installer (see the startup probe step for the import lists)'
             exit 1
           }
-          # Side by side with the stub it was made from: an installer that the
-          # loader refuses usually shows up here as a data directory that no
-          # longer points into the section it belongs to.
+          # Side by side with the stubs it was made from: an image that the
+          # loader refuses usually shows up here as a data directory or an
+          # entry point that no longer falls inside a section.
           Set-Content -Path peinfo.py -Encoding ascii -Value @(
-            'import sys, pefile',
+            'import os, sys, pefile',
             'for path in sys.argv[1:]:',
             '    pe = pefile.PE(path)',
-            '    oh = pe.OPTIONAL_HEADER',
-            '    print(path)',
-            '    print("  machine=0x%X image_base=0x%X sec_align=0x%X file_align=0x%X size_of_image=0x%X" % (pe.FILE_HEADER.Machine, oh.ImageBase, oh.SectionAlignment, oh.FileAlignment, oh.SizeOfImage))',
-            '    print("  os_version=%d.%d subsys_version=%d.%d subsys=%d dll_chars=0x%X" % (oh.MajorOperatingSystemVersion, oh.MinorOperatingSystemVersion, oh.MajorSubsystemVersion, oh.MinorSubsystemVersion, oh.Subsystem, oh.DllCharacteristics))',
+            '    fh, oh = pe.FILE_HEADER, pe.OPTIONAL_HEADER',
+            '    print(path, "file_size=%d" % os.path.getsize(path))',
+            '    print("  machine=0x%X nsections=%d symtab=0x%X nsymbols=%d file_chars=0x%X" % (fh.Machine, fh.NumberOfSections, fh.PointerToSymbolTable, fh.NumberOfSymbols, fh.Characteristics))',
+            '    print("  entry=0x%X size_of_headers=0x%X size_of_image=0x%X sec_align=0x%X file_align=0x%X image_base=0x%X" % (oh.AddressOfEntryPoint, oh.SizeOfHeaders, oh.SizeOfImage, oh.SectionAlignment, oh.FileAlignment, oh.ImageBase))',
+            '    print("  linker=%d.%d os_version=%d.%d subsys_version=%d.%d subsys=%d dll_chars=0x%X" % (oh.MajorLinkerVersion, oh.MinorLinkerVersion, oh.MajorOperatingSystemVersion, oh.MinorOperatingSystemVersion, oh.MajorSubsystemVersion, oh.MinorSubsystemVersion, oh.Subsystem, oh.DllCharacteristics))',
             '    secs = []',
             '    for s in pe.sections:',
             '        name = s.Name.rstrip(b"\0").decode()',
             '        secs.append((s.VirtualAddress, s.VirtualAddress + max(s.Misc_VirtualSize, s.SizeOfRawData), name))',
-            '        print("  sec %-8s va=0x%06X vsize=0x%06X raw=0x%06X rsize=0x%06X" % (name, s.VirtualAddress, s.Misc_VirtualSize, s.PointerToRawData, s.SizeOfRawData))',
+            '        print("  sec %-8s va=0x%06X vsize=0x%06X raw=0x%06X rsize=0x%06X chars=0x%08X" % (name, s.VirtualAddress, s.Misc_VirtualSize, s.PointerToRawData, s.SizeOfRawData, s.Characteristics))',
+            '    ep = [n for a, b, n in secs if a <= oh.AddressOfEntryPoint < b]',
+            '    print("  entry section=%s" % (ep[0] if ep else "NONE"))',
             '    for i, d in enumerate(oh.DATA_DIRECTORY):',
             '        if d.VirtualAddress or d.Size:',
             '            w = [n for a, b, n in secs if a <= d.VirtualAddress < b]',
             '            print("  dir[%02d] rva=0x%06X size=0x%06X section=%s" % (i, d.VirtualAddress, d.Size, w[0] if w else "NONE"))'
           )
-          python peinfo.py (Join-Path $dist.FullName 'Stubs\lzma-arm64-unicode') .\smoke-setup.exe
-          # Start-Process only says "%1 is not a valid Win32 application";
-          # System.Diagnostics.Process adds the Win32 error code.
-          $p = New-Object System.Diagnostics.Process
-          $p.StartInfo.FileName = (Resolve-Path .\smoke-setup.exe).Path
-          $p.StartInfo.Arguments = '/S'
-          $p.StartInfo.UseShellExecute = $false
-          try {
-            [void]$p.Start()
-            if (-not $p.WaitForExit(120000)) {
-              $p.Kill()
-              Write-Warning 'installer still running after 120 s, killed'
+          $stubs = @(
+            (Join-Path $dist.FullName 'Stubs\zlib-arm64-unicode'),
+            (Join-Path $dist.FullName 'Stubs\lzma-arm64-unicode')
+          )
+          python peinfo.py $stubs[0] $stubs[1] .\smoke-setup.exe
+          # Start-Process only says "%1 is not a valid Win32 application", and
+          # one message covers several different Win32 errors, so go through
+          # System.Diagnostics.Process and print the code.  Probe the staged
+          # stubs too: if the loader refuses a stub that makensis never touched,
+          # then the problem is in how the stub is linked, not in what makensis
+          # does to it.
+          function Start-AndReport([string]$exe, [string]$arguments) {
+            $p = New-Object System.Diagnostics.Process
+            $p.StartInfo.FileName = (Resolve-Path $exe).Path
+            $p.StartInfo.Arguments = $arguments
+            $p.StartInfo.UseShellExecute = $false
+            try {
+              [void]$p.Start()
+              if (-not $p.WaitForExit(20000)) {
+                $p.Kill()
+                Write-Output "  $exe : started, still running after 20 s (killed)"
+              } else {
+                Write-Output "  $exe : started, exit=$($p.ExitCode)"
+              }
+            } catch {
+              $e = $_.Exception
+              while ($e.InnerException) { $e = $e.InnerException }
+              Write-Output "  $exe : start failed code=$($e.NativeErrorCode) $($e.Message)"
             }
-            Write-Output "installer exit=$($p.ExitCode)"
-          } catch {
-            Write-Output "installer failed to start: $($_.Exception.Message)"
           }
+          foreach ($s in $stubs) {
+            if (-not (Test-Path $s)) { continue }
+            $tmp = "probe-$(Split-Path -Leaf $s).exe"
+            Copy-Item $s $tmp -Force
+            Start-AndReport $tmp '/S'
+          }
+          Start-AndReport .\smoke-setup.exe '/S'
           $installed = "$env:LOCALAPPDATA\arm64-smoke\payload.txt"
           if (Test-Path $installed) {
             Write-Output "SMOKE OK: arm64 stub installed $(Get-Content $installed)"
