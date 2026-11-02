@@ -180,20 +180,38 @@ jobs:
           $dst = "$HOME/zlib-x64"
           New-Item -ItemType Directory -Force "$dst/lib" | Out-Null
           Copy-Item "$root/include" -Destination "$dst/include" -Recurse -Force
-          # vcpkg's zlib port names the import library after the DLL it came
-          # from and that has moved around between releases, so look it up
-          # instead of hard-coding installed/x64-windows/lib/zlib.lib
-          $imp = Get-ChildItem "$root" -Recurse -Filter '*.lib' |
-            Where-Object { $_.BaseName -like 'z*' } | Select-Object -First 1
+          # vcpkg's zlib port ships the runtime as z.dll plus a release (z.lib)
+          # and a debug (zd.lib) import library.  An import library records the
+          # DLL name it was built for, so picking the debug one links a
+          # makensis.exe that demands zd.dll at run time and dies with
+          # 0xC0000135.  Pick the release DLL first, then the import library
+          # that was made for that exact name.
+          $dll = Get-ChildItem "$root" -Recurse -Filter '*.dll' |
+            Where-Object { $_.BaseName -like 'z*' -and $_.BaseName -notmatch 'd$' -and
+                           $_.FullName -notmatch '[\\/]debug[\\/]' } |
+            Sort-Object FullName | Select-Object -First 1
+          if (-not $dll) {
+            Get-ChildItem "$root" -Recurse -File | Select-Object -ExpandProperty FullName
+            Write-Error 'no zlib runtime DLL found under installed/x64-windows'
+            exit 1
+          }
+          $imp = Get-ChildItem "$root" -Recurse -Filter "$($dll.BaseName).lib" |
+            Where-Object { $_.BaseName -notmatch 'static' -and
+                           $_.FullName -notmatch '[\\/]debug[\\/]' } |
+            Sort-Object FullName | Select-Object -First 1
+          if (-not $imp) {
+            $imp = Get-ChildItem "$root" -Recurse -Filter '*.lib' |
+              Where-Object { $_.BaseName -like 'z*' -and $_.BaseName -notmatch 'd$' -and
+                             $_.FullName -notmatch '[\\/]debug[\\/]' } |
+              Sort-Object FullName | Select-Object -First 1
+          }
           if (-not $imp) {
             Get-ChildItem "$root" -Recurse -File | Select-Object -ExpandProperty FullName
             Write-Error 'no zlib import library found under installed/x64-windows'
             exit 1
           }
           Copy-Item $imp.FullName -Destination "$dst/lib/zdll.lib"
-          $dll = Get-ChildItem "$root" -Recurse -Filter '*.dll' |
-            Where-Object { $_.BaseName -like 'z*' } | Select-Object -First 1
-          if ($dll) { Copy-Item $dll.FullName -Destination "$dst/" }
+          Copy-Item $dll.FullName -Destination "$dst/"
           Write-Output "import lib: $($imp.Name); runtime: $($dll.Name)"
 
       - name: Setup MSVC amd64 environment
@@ -297,19 +315,34 @@ jobs:
           $dst = "$HOME/zlib-arm64"
           New-Item -ItemType Directory -Force "$dst/lib" | Out-Null
           Copy-Item "$root/include" -Destination "$dst/include" -Recurse -Force
-          # same lookup as the x64 pass: the port's import library name has
-          # moved between releases, so search instead of hard-coding lib/zlib.lib
-          $imp = Get-ChildItem "$root" -Recurse -Filter '*.lib' |
-            Where-Object { $_.BaseName -like 'z*' } | Select-Object -First 1
+          # same lookup as the x64 pass: release DLL first, then the import
+          # library built for that exact name (see the x64 step for why)
+          $dll = Get-ChildItem "$root" -Recurse -Filter '*.dll' |
+            Where-Object { $_.BaseName -like 'z*' -and $_.BaseName -notmatch 'd$' -and
+                           $_.FullName -notmatch '[\\/]debug[\\/]' } |
+            Sort-Object FullName | Select-Object -First 1
+          if (-not $dll) {
+            Get-ChildItem "$root" -Recurse -File | Select-Object -ExpandProperty FullName
+            Write-Error 'no zlib runtime DLL found under installed/arm64-windows'
+            exit 1
+          }
+          $imp = Get-ChildItem "$root" -Recurse -Filter "$($dll.BaseName).lib" |
+            Where-Object { $_.BaseName -notmatch 'static' -and
+                           $_.FullName -notmatch '[\\/]debug[\\/]' } |
+            Sort-Object FullName | Select-Object -First 1
+          if (-not $imp) {
+            $imp = Get-ChildItem "$root" -Recurse -Filter '*.lib' |
+              Where-Object { $_.BaseName -like 'z*' -and $_.BaseName -notmatch 'd$' -and
+                             $_.FullName -notmatch '[\\/]debug[\\/]' } |
+              Sort-Object FullName | Select-Object -First 1
+          }
           if (-not $imp) {
             Get-ChildItem "$root" -Recurse -File | Select-Object -ExpandProperty FullName
             Write-Error 'no zlib import library found under installed/arm64-windows'
             exit 1
           }
           Copy-Item $imp.FullName -Destination "$dst/lib/zdll.lib"
-          $dll = Get-ChildItem "$root" -Recurse -Filter '*.dll' |
-            Where-Object { $_.BaseName -like 'z*' } | Select-Object -First 1
-          if ($dll) { Copy-Item $dll.FullName -Destination "$dst/" }
+          Copy-Item $dll.FullName -Destination "$dst/"
           Write-Output "import lib: $($imp.Name); runtime: $($dll.Name)"
 
       - name: Build makensis (MSVC arm64)
@@ -324,36 +357,31 @@ jobs:
       - name: Probe makensis startup (informational)
         shell: pwsh
         run: |
-          $mk = 'build/urelease/makensis/makensis.exe'
+          $mk = 'build\urelease\makensis\makensis.exe'
           echo "--- makensis import list:"
           dumpbin /dependents $mk 2>&1 | ForEach-Object { $_.Trim() } |
             Where-Object { $_ -match '^[A-Za-z0-9_.+-]+\.dll$' }
           echo "--- zlib runtime and its imports, with System32 resolution:"
+          $sys32 = Join-Path $env:SystemRoot 'System32'
           foreach ($d in (Get-ChildItem "$HOME/zlib-arm64" -Filter '*.dll')) {
             echo "  file: $($d.FullName)"
             $deps = dumpbin /dependents $d.FullName 2>&1 | ForEach-Object { $_.Trim() } |
               Where-Object { $_ -match '^[A-Za-z0-9_.+-]+\.dll$' }
             foreach ($dep in $deps) {
-              echo "    $dep in System32: $(Test-Path (Join-Path "$env:SystemRoot\System32" $dep))"
+              $here = Test-Path (Join-Path $sys32 $dep)
+              echo "    $dep in System32: $here"
             }
           }
-          echo "--- VC redist assemblies for arm64 on this image:"
-          foreach ($r in (Get-ChildItem $env:VCToolsRedistDir -Recurse -Filter '*.dll' -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -match 'arm64' })) {
-            echo "    $($r.Directory.Name)\$($r.Name)"
+          echo "--- VC runtime presence (z.dll imports VCRUNTIME140.dll):"
+          foreach ($name in @('VCRUNTIME140.dll', 'VCRUNTIME140_1.dll', 'ucrtbase.dll')) {
+            $here = Test-Path (Join-Path $sys32 $name)
+            echo "    $name in System32: $here"
           }
-          echo "--- bare run (expect a failure if the runtime is not next to it):"
+          echo "--- bare run (fails if the runtime it was linked against is not next to it):"
           & $mk /VERSION
           echo "exit=$LASTEXITCODE"
           echo "--- run with the zlib folder appended to PATH:"
           $env:PATH = "$env:PATH;$HOME\zlib-arm64"
-          & $mk /VERSION
-          echo "exit=$LASTEXITCODE"
-          echo "--- run with the VC redist folders appended to PATH as well:"
-          foreach ($r in (Get-ChildItem $env:VCToolsRedistDir -Recurse -Filter '*.dll' -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -match 'arm64' } | Select-Object -ExpandProperty Directory -Unique)) {
-            $env:PATH = "$env:PATH;$($r.FullName)"
-          }
           & $mk /VERSION
           echo "exit=$LASTEXITCODE"
         continue-on-error: true
@@ -400,14 +428,11 @@ jobs:
       - name: Smoke test an arm64 installer (informational)
         shell: pwsh
         run: |
-          # makensis.exe links against the vcpkg zlib runtime, which in turn
-          # needs the VC runtime; put both directories on PATH (appended, so
-          # nothing is shadowed) before anything runs a vcpkg-linked binary.
-          $env:PATH = "$env:PATH;$HOME\zlib-arm64"
-          foreach ($r in (Get-ChildItem $env:VCToolsRedistDir -Recurse -Filter '*.dll' -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -match 'arm64' } | Select-Object -ExpandProperty Directory -Unique)) {
-            $env:PATH = "$env:PATH;$($r.FullName)"
-          }
+          # No PATH help here on purpose: with the release import library the
+          # staged Bin\makensis.exe asks for z.dll, which dist-zip stages right
+          # next to it, and z.dll only needs VCRUNTIME140.dll which is present
+          # in System32 on this image (probe step).  If this fails again the
+          # staged layout itself is wrong, and that is what we want to see.
           scons "-j$Env:NUMBER_OF_PROCESSORS" MSTOOLKIT=yes MSVC_USE_SCRIPT=None MSVS_VERSION=14.5 `
             TARGET_ARCH=arm64 ZLIB_W32=$HOME/zlib-arm64 SKIPUTILS="NSIS Menu" DOCTYPES=web dist-zip
           $dist = Get-ChildItem -Directory -Filter 'nsis-*' | Select-Object -First 1
