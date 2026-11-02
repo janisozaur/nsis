@@ -621,19 +621,27 @@ jobs:
           if (Test-Path .\smoke-setup.exe) { Probe '.\smoke-setup.exe' '/S' }
           # LOAD_WITH_ALTERED_SEARCH_PATH (0x1) so that a plugin finds anything
           # sitting next to it, which is how the stub loads it at run time.
-          Add-Type -Name Ldr -MemberDefinition '[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)] public static extern IntPtr LoadLibraryExW(string file, IntPtr hFile, uint flags); [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)] public static extern bool FreeLibrary(IntPtr module);'
+          # Add-Type without -Namespace hides the class in a default namespace
+          # and every later [Ldr] then dies with "Unable to find type" (run
+          # 41428152508), so the namespace is spelled out on both sides.
+          Add-Type -Name Ldr -Namespace NsisProbe -MemberDefinition '[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)] public static extern IntPtr LoadLibraryExW(string file, IntPtr hFile, uint flags); [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)] public static extern bool FreeLibrary(IntPtr module);'
           $mods = @(Get-ChildItem (Join-Path $dist.FullName 'Plugins\arm64-unicode') -File -Filter '*.dll' -ErrorAction SilentlyContinue)
           $mods += @(Get-ChildItem (Join-Path $dist.FullName 'Bin') -File -Filter 'RegTool-arm64.bin' -ErrorAction SilentlyContinue)
           if (-not $mods.Count) { $bad += 'no arm64 plugins in the dist to load' }
           foreach ($m in $mods) {
-            $h = [Ldr]::LoadLibraryExW($m.FullName, [IntPtr]::Zero, 0x1)
-            if ($h -eq [IntPtr]::Zero) {
-              $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
-              $bad += "LoadLibrary refused $($m.Name) (Win32 error $err)"
-              Write-Output "  $($m.Name) : LoadLibrary refused it, Win32 error $err"
-            } else {
-              Write-Output "  $($m.Name) : mapped at 0x$($h.ToString('X'))"
-              [void][Ldr]::FreeLibrary($h)
+            try {
+              $h = [NsisProbe.Ldr]::LoadLibraryExW($m.FullName, [IntPtr]::Zero, 0x1)
+              if ($h -eq [IntPtr]::Zero) {
+                $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                $bad += "LoadLibrary refused $($m.Name) (Win32 error $err)"
+                Write-Output "  $($m.Name) : LoadLibrary refused it, Win32 error $err"
+              } else {
+                Write-Output "  $($m.Name) : mapped at 0x$($h.ToString('X'))"
+                [void][NsisProbe.Ldr]::FreeLibrary($h)
+              }
+            } catch {
+              $bad += "could not hand $($m.Name) to LoadLibraryExW ($($_.Exception.Message))"
+              Write-Output "  $($m.Name) : $($_.Exception.Message)"
             }
           }
           if ($bad.Count) {
