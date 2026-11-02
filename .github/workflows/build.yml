@@ -471,7 +471,44 @@ jobs:
             Write-Error 'makensis produced no installer (see the startup probe step for the import lists)'
             exit 1
           }
-          Start-Process -FilePath .\smoke-setup.exe -ArgumentList '/S' -NoNewWindow -Wait
+          # Side by side with the stub it was made from: an installer that the
+          # loader refuses usually shows up here as a data directory that no
+          # longer points into the section it belongs to.
+          Set-Content -Path peinfo.py -Encoding ascii -Value @(
+            'import sys, pefile',
+            'for path in sys.argv[1:]:',
+            '    pe = pefile.PE(path)',
+            '    oh = pe.OPTIONAL_HEADER',
+            '    print(path)',
+            '    print("  machine=0x%X image_base=0x%X sec_align=0x%X file_align=0x%X size_of_image=0x%X" % (pe.FILE_HEADER.Machine, oh.ImageBase, oh.SectionAlignment, oh.FileAlignment, oh.SizeOfImage))',
+            '    print("  os_version=%d.%d subsys_version=%d.%d subsys=%d dll_chars=0x%X" % (oh.MajorOperatingSystemVersion, oh.MinorOperatingSystemVersion, oh.MajorSubsystemVersion, oh.MinorSubsystemVersion, oh.Subsystem, oh.DllCharacteristics))',
+            '    secs = []',
+            '    for s in pe.sections:',
+            '        name = s.Name.rstrip(b"\0").decode()',
+            '        secs.append((s.VirtualAddress, s.VirtualAddress + max(s.Misc_VirtualSize, s.SizeOfRawData), name))',
+            '        print("  sec %-8s va=0x%06X vsize=0x%06X raw=0x%06X rsize=0x%06X" % (name, s.VirtualAddress, s.Misc_VirtualSize, s.PointerToRawData, s.SizeOfRawData))',
+            '    for i, d in enumerate(oh.DATA_DIRECTORY):',
+            '        if d.VirtualAddress or d.Size:',
+            '            w = [n for a, b, n in secs if a <= d.VirtualAddress < b]',
+            '            print("  dir[%02d] rva=0x%06X size=0x%06X section=%s" % (i, d.VirtualAddress, d.Size, w[0] if w else "NONE"))'
+          )
+          python peinfo.py (Join-Path $dist.FullName 'Stubs\lzma-arm64-unicode') .\smoke-setup.exe
+          # Start-Process only says "%1 is not a valid Win32 application";
+          # System.Diagnostics.Process adds the Win32 error code.
+          $p = New-Object System.Diagnostics.Process
+          $p.StartInfo.FileName = (Resolve-Path .\smoke-setup.exe).Path
+          $p.StartInfo.Arguments = '/S'
+          $p.StartInfo.UseShellExecute = $false
+          try {
+            [void]$p.Start()
+            if (-not $p.WaitForExit(120000)) {
+              $p.Kill()
+              Write-Warning 'installer still running after 120 s, killed'
+            }
+            Write-Output "installer exit=$($p.ExitCode)"
+          } catch {
+            Write-Output "installer failed to start: $($_.Exception.Message)"
+          }
           $installed = "$env:LOCALAPPDATA\arm64-smoke\payload.txt"
           if (Test-Path $installed) {
             Write-Output "SMOKE OK: arm64 stub installed $(Get-Content $installed)"
