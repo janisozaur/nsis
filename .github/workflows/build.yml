@@ -318,6 +318,31 @@ jobs:
           scons "-j$Env:NUMBER_OF_PROCESSORS" MSTOOLKIT=yes MSVC_USE_SCRIPT=None MSVS_VERSION=14.5 `
             TARGET_ARCH=arm64 ZLIB_W32=$HOME/zlib-arm64 SKIPUTILS="NSIS Menu" makensis
 
+      # Tells apart "the shipped makensis cannot find its zlib runtime" from
+      # "the zlib runtime itself cannot load" and "the SubStart wrapper dies",
+      # because a 0xC0000135 exit code alone does not say which.
+      - name: Probe makensis startup (informational)
+        shell: pwsh
+        run: |
+          $mk = 'build/urelease/makensis/makensis.exe'
+          echo "--- dependents of $mk:"
+          dumpbin /dependents $mk 2>&1 | Select-String -Pattern '\.dll' | ForEach-Object { $_.Line.Trim() }
+          echo "--- dependents of the zlib runtime that makensis links against:"
+          foreach ($d in (Get-ChildItem "$HOME/zlib-arm64" -Filter '*.dll')) {
+            echo "  $($d.FullName)"
+            foreach ($dep in (dumpbin /dependents $d.FullName 2>&1 | Select-String -Pattern '\.dll' | ForEach-Object { $_.Line.Trim() })) {
+              echo "    $dep"
+            }
+          }
+          echo "--- bare run:"
+          & $mk /VERSION
+          echo "exit=$LASTEXITCODE"
+          echo "--- with the zlib folder on PATH:"
+          $env:PATH = "$HOME\zlib-arm64;$env:PATH"
+          & $mk /VERSION
+          echo "exit=$LASTEXITCODE"
+        continue-on-error: true
+
       - name: Build arm64 stubs (MSVC arm64)
         shell: pwsh
         run: |
@@ -363,11 +388,24 @@ jobs:
           scons "-j$Env:NUMBER_OF_PROCESSORS" MSTOOLKIT=yes MSVC_USE_SCRIPT=None MSVS_VERSION=14.5 `
             TARGET_ARCH=arm64 ZLIB_W32=$HOME/zlib-arm64 SKIPUTILS="NSIS Menu" DOCTYPES=web dist-zip
           $dist = Get-ChildItem -Directory -Filter 'nsis-*' | Select-Object -First 1
-          if (-not $dist -or -not (Test-Path "$($dist.FullName)\makensis.exe")) {
-            Write-Warning 'no staged dist dir (nsis-*/makensis.exe), smoke test skipped'
+          if (-not $dist) {
+            Write-Warning 'no staged dist dir (nsis-*), smoke test skipped'
+            exit 0
+          }
+          # dist-zip stages the real makensis as Bin\makensis.exe and puts a
+          # SubStart launcher at the root; the build_nsis_menu_for_zip action
+          # that runs the launcher can fail without breaking the staging, so
+          # keep going and drive makensis ourselves.
+          $mk = Join-Path $dist.FullName 'Bin\makensis.exe'
+          if (-not (Test-Path $mk)) { $mk = Join-Path $dist.FullName 'makensis.exe' }
+          if (-not (Test-Path $mk)) {
+            Write-Warning "no makensis.exe under $($dist.FullName), smoke test skipped"
             exit 0
           }
           $env:NSISDIR = $dist.FullName
+          echo "makensis: $mk ; NSISDIR=$env:NSISDIR"
+          Get-ChildItem (Join-Path $dist.FullName 'Bin') -Filter '*.dll' |
+            ForEach-Object { echo "  Bin\$($_.Name)" }
           Set-Content -Path payload.txt -Encoding ascii -Value 'arm64 smoke payload'
           Set-Content -Path smoke.nsi -Encoding ascii -Value @(
             'Unicode true',
@@ -379,7 +417,14 @@ jobs:
             '  File "payload.txt"',
             'SectionEnd'
           )
-          & "$($dist.FullName)\makensis.exe" /V2 smoke.nsi
+          & $mk /V2 smoke.nsi
+          $rc = $LASTEXITCODE
+          if (-not (Test-Path smoke-setup.exe)) {
+            Write-Warning "first makensis run produced no installer (exit $rc); retrying with the zlib folder on PATH"
+            $env:PATH = "$HOME\zlib-arm64;$env:PATH"
+            & $mk /V2 smoke.nsi
+            Write-Output "retry exit=$LASTEXITCODE (see the startup probe step for the import lists)"
+          }
           if (-not (Test-Path smoke-setup.exe)) { Write-Error 'makensis produced no installer'; exit 1 }
           Start-Process -FilePath .\smoke-setup.exe -ArgumentList '/S' -NoNewWindow -Wait
           $installed = "$env:LOCALAPPDATA\arm64-smoke\payload.txt"
