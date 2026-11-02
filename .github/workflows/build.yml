@@ -552,6 +552,69 @@ jobs:
           }
         continue-on-error: true
 
+      # 0xC0000409 says "stack buffer overrun / __fastfail", which covers
+      # several unrelated things, and the bare stubs show the same code, so
+      # this splits the two live possibilities.  The tiny probe is an arm64
+      # image from the same toolchain with no CRT and one DIR64 base
+      # relocation: if it runs, arm64 + /NODEFAULTLIB + relocations are fine
+      # on this machine and the fault is in the NSIS stub.  The base address
+      # shows whether the loader actually relocated the image: under wine the
+      # stubs load at their preferred 0x140000000 and work, so a relocated
+      # load here points at something that depends on the preferred base.
+      # WER local dumps carry the exception record and the faulting address,
+      # which is the part a runner log cannot show.
+      - name: Diagnose arm64 startup (informational)
+        shell: pwsh
+        run: |
+          $dumps = Join-Path $PWD 'dumps'
+          New-Item -ItemType Directory -Path $dumps -Force | Out-Null
+          Set-Content -Path tiny.c -Encoding ascii -Value @(
+            '#include <windows.h>',
+            'void __stdcall tiny_entry(void);',
+            'static void * volatile tiny_p = (void *) tiny_entry;',
+            'void __stdcall tiny_entry(void) { (void) tiny_p; ExitProcess(0x5A); }'
+          )
+          cl /nologo /O2 /DWIN32 /Fe:tiny-arm64-probe.exe tiny.c `
+            /link /SUBSYSTEM:CONSOLE /ENTRY:tiny_entry /NODEFAULTLIB /DYNAMICBASE /HIGHENTROPYVA
+          Write-Output "cl exit=$LASTEXITCODE"
+          function Probe([string]$exe, [string]$a) {
+            if (-not (Test-Path $exe)) { Write-Output "  $exe : missing"; return }
+            $p = New-Object System.Diagnostics.Process
+            $p.StartInfo.FileName = (Resolve-Path $exe).Path
+            $p.StartInfo.Arguments = $a
+            $p.StartInfo.UseShellExecute = $false
+            try {
+              [void]$p.Start()
+              try {
+                Write-Output ("  $exe : base=0x{0:X}" -f $p.Modules[0].BaseAddress)
+              } catch { Write-Output "  $exe : base unavailable: $($_.Exception.Message)" }
+              if (-not $p.WaitForExit(20000)) {
+                $p.Kill(); Write-Output "  $exe : still running (killed)"
+              } else {
+                Write-Output ("  $exe : exit=0x{0:X8}" -f [uint32]$p.ExitCode)
+              }
+            } catch {
+              $e = $_.Exception
+              while ($e.InnerException) { $e = $e.InnerException }
+              Write-Output "  $exe : start failed code=$($e.NativeErrorCode) $($e.Message)"
+            }
+          }
+          Probe 'tiny-arm64-probe.exe' ''
+          $key = 'HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\smoke-setup.exe'
+          reg add "$key" /v DumpFolder /t REG_EXPAND_SZ /d $dumps /f | Out-Null
+          reg add "$key" /v DumpType /t REG_DWORD /d 2 /f | Out-Null
+          reg add "$key" /v DumpCount /t REG_DWORD /d 3 /f | Out-Null
+          if (Test-Path .\smoke-setup.exe) {
+            Probe '.\smoke-setup.exe' '/S'
+            Probe '.\smoke-setup.exe' '/S'
+          } else {
+            Write-Warning 'no smoke-setup.exe from the smoke step, nothing to dump'
+          }
+          Get-ChildItem $dumps -Filter '*.dmp' -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Output "  dump: $($_.Name) $($_.Length) bytes" }
+          reg delete "$key" /f | Out-Null
+        continue-on-error: true
+
       # Nothing in this job gates anything, and a failing arm64 image is
       # easier to look at somewhere with more tools than a runner: the zip is a
       # complete arm64 build (Bin\makensis.exe, Stubs, Plugins) and
@@ -568,6 +631,8 @@ jobs:
             smoke.nsi
             payload.txt
             peinfo.py
+            tiny-arm64-probe.exe
+            dumps/*.dmp
           retention-days: 14
           if-no-files-found: warn
 
